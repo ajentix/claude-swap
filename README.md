@@ -192,6 +192,8 @@ Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usag
 
 <img src="assets/tui-watch.png" width="760" alt="cswap watch — live 5h/7d usage bars for every account, with reset times and the active account marked">
 
+`cswap quota` shows remaining quota across Claude, Antigravity, Codex, Kimi Coding, z.ai and OpenCode Go. Open **All Providers Quota** with `p` in the TUI. See [provider setup and commands](docs/provider-quota.md).
+
 ### Refresh expired tokens
 
 If an account's token expires, log back into Claude Code with that account and re-run:

@@ -895,6 +895,7 @@ class TestDashboard:
                 "disable-menu",
                 "remove-menu",
                 "theme-menu",
+                "quota",
                 "quit",
             ]
             # nest into Add (index 3), then back out with escape
@@ -906,6 +907,55 @@ class TestDashboard:
             await pilot.pause()
             ids = [item.action_id for item in menu.query(MenuItem)]
             assert ids[0] == "switch"
+
+    async def test_quota_screen_refresh_and_switch_shortcuts(self, tmp_path, monkeypatch):
+        from textual.widgets import DataTable
+
+        from claude_swap.providers.common import ProviderAccountQuota, QuotaWindow
+        from claude_swap.tui import quota
+
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        refreshes, switches = [], []
+        rows = [
+            ProviderAccountQuota("codex", "test", "1", switchable=True,
+                                 windows=(QuotaWindow("5h", 75),)),
+            ProviderAccountQuota("agy", "test-two", "1", switchable=True),
+        ]
+
+        def collect(*, refresh, switcher):
+            assert switcher is fake
+            refreshes.append(refresh)
+            return rows
+
+        class Switcher:
+            def __init__(self, root):
+                pass
+
+            def switch(self, label):
+                switches.append(label)
+
+        monkeypatch.setattr(quota, "collect_quota", collect)
+        monkeypatch.setattr(quota, "SWITCHERS", {"codex": Switcher, "agy": Switcher})
+        monkeypatch.setattr(quota, "invalidate_quota", lambda _: None)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await pilot.press("p")
+            await app.workers.wait_for_complete()
+            assert isinstance(app.screen, quota.QuotaScreen)
+            assert app.screen.query_one(DataTable).row_count == 2
+            assert refreshes == [False]
+            await pilot.press("r")
+            await app.workers.wait_for_complete()
+            assert refreshes[-1] is True
+            await pilot.press("down", "enter")
+            await app.workers.wait_for_complete()
+            assert switches == ["test-two"]
+            await pilot.press("1")
+            await app.workers.wait_for_complete()
+            assert switches == ["test-two", "test"]
+            await pilot.press("escape")
+            assert not isinstance(app.screen, quota.QuotaScreen)
 
     async def test_remove_menu_shows_alias_before_email(self, tmp_path):
         fake = FakeSwitcher(

@@ -42,6 +42,7 @@ class DashboardScreen(Screen):
     BINDINGS = [
         Binding("s", "open_switch", "Switch accounts"),
         Binding("w", "app.open_watch", "Watch"),
+        Binding("p", "app.open_quota", "Provider quotas"),
         Binding("escape,left", "menu_back", "Back", show=False),
         Binding("q", "app.quit", "Quit"),
         # Power shortcuts; the menu is the discoverable path.
@@ -81,6 +82,7 @@ class DashboardScreen(Screen):
             ("Disable / enable account…", "disable-menu"),
             ("Remove account…", "remove-menu"),
             ("Theme…", "theme-menu"),
+            ("All Providers Quota", "quota"),
             ("Quit", "quit"),
         ]
 
@@ -161,6 +163,7 @@ class DashboardScreen(Screen):
             "switch": self.action_open_switch,
             "watch": app.action_open_watch,
             "auto": app.action_open_auto,
+            "quota": app.action_open_quota,
             "add-login": app.action_add_current,
             "add-token": app.action_add_token,
             "quit": app.exit,

@@ -76,6 +76,15 @@ MenuItem Static.menu-item-muted { color: $secondary; }
     color: $secondary;
 }
 
+.quota-title, #quota-status {
+    height: auto;
+    padding: 0 1;
+}
+
+#quota-table {
+    height: 1fr;
+}
+
 /* -- auto screen ---------------------------------------------------------- */
 
 #auto-top {

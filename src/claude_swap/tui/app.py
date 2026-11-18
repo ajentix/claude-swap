@@ -26,6 +26,7 @@ from claude_swap.tui.autoview import AutoScreen
 from claude_swap.tui.dashboard import DashboardScreen, WatchScreen
 from claude_swap.tui.data import ActionResult, SnapshotSource, format_duration, run_action
 from claude_swap.tui.modals import AddTokenModal, ConfirmModal, OutputModal, TokenForm
+from claude_swap.tui.quota import QuotaScreen
 from claude_swap.tui.theme import CSWAP_DARK, CSWAP_LIGHT
 
 
@@ -112,6 +113,8 @@ class CswapApp(App):
         one store-only lane. Auto mode already has an engine fetching, so it
         launches only store-only snapshots.
         """
+        if isinstance(self.screen, QuotaScreen):
+            return
         if self._store_only:
             self._start_store_refresh()
         elif not self._normal_refreshing:
@@ -404,6 +407,9 @@ class CswapApp(App):
         if isinstance(self.screen, AutoScreen):
             return
         self.push_screen(AutoScreen())
+
+    def action_open_quota(self) -> None:
+        self.push_screen(QuotaScreen())
 
     def action_open_watch(self) -> None:
         if isinstance(self.screen, WatchScreen):
