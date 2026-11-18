@@ -11,12 +11,13 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from .coding_credentials import local_coding_credential
 from .common import ProviderAccountQuota, ProviderError, display_text, object_dict, objects, window
 
 CODING_ENDPOINTS = {
-    "kimi-coding": ("https://api.kimi.com/coding/v1/usages", "KIMI_CODING_API_KEY"),
-    "zai-glm": ("https://api.z.ai/api/monitor/usage/quota/limit", "ZAI_API_KEY"),
-    "opencode-go": ("https://opencode.ai/zen/go/v1/usage", "OPENCODE_GO_API_KEY"),
+    "kimi-coding": ("https://api.kimi.com/coding/v1/usages", ("KIMI_CODING_API_KEY", "KIMI_CODE_API_KEY")),
+    "zai-glm": ("https://api.z.ai/api/monitor/usage/quota/limit", ("ZAI_API_KEY", "ZAI_CODING_PLAN_API_KEY")),
+    "opencode-go": ("https://opencode.ai/zen/go/v1/usage", ("OPENCODE_GO_API_KEY", "OPENCODE_API_KEY")),
 }
 
 
@@ -35,9 +36,16 @@ def get_usage(url: str, headers: dict[str, str]) -> dict:
         data = json.loads(raw)
     except HTTPError as exc:
         code = exc.code
-        exc.close()
         messages = {401: "authentication required", 403: "access denied or subscription unavailable", 429: "rate limited"}
         message = messages.get(code, "usage request failed")
+        with exc:
+            if code == 403 and url == CODING_ENDPOINTS["opencode-go"][0]:
+                try:
+                    body = object_dict(json.loads(exc.read(4096)))
+                    if object_dict(body.get("error")).get("type") == "EntitlementError":
+                        message = "OpenCode Go subscription required"
+                except (OSError, ValueError):
+                    pass
         raise ProviderError(f"HTTP {code}: {message}") from None
     except (URLError, OSError, ValueError) as exc:
         message = "Invalid usage response" if isinstance(exc, ValueError) else "Usage endpoint unavailable"
@@ -81,7 +89,8 @@ def zai_usage(data: dict, key: str) -> tuple:
 def opencode_usage(data: dict, key: str, session: str) -> tuple:
     pools = object_dict(data.get("usage"))
     windows = tuple(
-        window(label, entry.get("percent"), entry.get("resetsAt"), offset=100, scale=-1)
+        window(label, 100 if entry.get("status") == "rate-limited" else entry.get("percent"),
+               entry.get("resetsAt"), offset=100, scale=-1)
         for name, label in (("rolling", "5h"), ("weekly", "7d"), ("monthly", "mo"))
         if (entry := object_dict(pools.get(name)))
     )
@@ -95,7 +104,7 @@ def _credential(settings: dict, field: str) -> str:
 
 
 def coding_plan_jobs(root: Path, provider: str) -> list[Callable[[], ProviderAccountQuota]]:
-    url, env = CODING_ENDPOINTS[provider]
+    url, env_names = CODING_ENDPOINTS[provider]
     try:
         with (root / "providers.toml").open("rb") as stream:
             config = tomllib.load(stream)
@@ -107,8 +116,19 @@ def coding_plan_jobs(root: Path, provider: str) -> list[Callable[[], ProviderAcc
     credentials = {label: value for label, value in section.items() if isinstance(value, dict)}
     if any(name in section for name in ("api_key", "api_key_env", "session", "session_env")):
         credentials["default"] = section
-    if not credentials and os.environ.get(env):
-        credentials["default"] = {"api_key_env": env}
+    if not credentials:
+        env = next((name for name in env_names if os.environ.get(name, "").strip()), None)
+        if env:
+            credentials["default"] = {"api_key_env": env}
+        else:
+            key, label, local_url = local_coding_credential(provider, Path.home())
+            if key:
+                credentials[label] = {"api_key": key}
+                url = local_url or url
+    if not credentials:
+        return [lambda: ProviderAccountQuota(
+            provider, "-", status="unconfigured", error=f"Set {env_names[0]} or configure a local login",
+        )]
     return [
         lambda label=label, settings=settings: _coding_plan_row(provider, label, url, settings)
         for label, settings in sorted(credentials.items())

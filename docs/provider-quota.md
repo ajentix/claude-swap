@@ -34,6 +34,8 @@ Codex uses the direct CLI login in `~/.codex/auth.json` and saves profiles in `~
 
 Use the `KIMI_CODING_API_KEY`, `ZAI_API_KEY` and `OPENCODE_GO_API_KEY` environment variables, or put account definitions in `~/.cswap/providers.toml`. A provider can have multiple named tables. `api_key_env` names an environment variable. `api_key` can hold the value directly in a private config file. OpenCode Go can also use `session_env`, `session` or the `OPENCODE_GO_SESSION` environment variable for its `x-opencode-session` header.
 
+When a provider has no explicit configuration, `cswap` checks existing CodexBar and OpenCode logins, then the managed Kimi CLI configuration for Kimi Coding. These credential stores are read-only. A provider without a key shows `unconfigured`.
+
 ```toml
 [kimi-coding.personal]
 api_key_env = "KIMI_CODING_API_KEY"
@@ -47,3 +49,12 @@ session_env = "OPENCODE_GO_SESSION"
 ```
 
 Coding-plan rows are usage-only. HTTP errors appear in the affected row.
+
+On Windows, install over the existing `cswap` tool from PowerShell and check the three plans together:
+
+```powershell
+uv tool install --force 'git+https://github.com/ajentix/claude-swap.git@main'
+cswap quota --refresh --provider kimi-coding --provider zai-glm --provider opencode-go
+```
+
+The install uses the existing Claude account store for that Windows user. Antigravity and Codex read that user's active native logins. A subscription is discoverable when its key is available in an environment variable, in `providers.toml`, or in a supported local credential store.

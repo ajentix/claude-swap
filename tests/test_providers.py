@@ -6,6 +6,7 @@ import base64
 import ctypes as ct
 import io
 import json
+import sqlite3
 import sys
 import time
 from datetime import datetime
@@ -17,7 +18,7 @@ from urllib.error import HTTPError
 import pytest
 
 from claude_swap import cli as main_cli
-from claude_swap.providers import agy, agy_keyring, api, claude, codex, common, quota
+from claude_swap.providers import agy, agy_keyring, api, claude, codex, coding_credentials, common, quota
 
 
 def jwt(**claims):
@@ -222,6 +223,95 @@ def test_coding_plan_quota_parsing(monkeypatch, tmp_path, provider, response, wi
     assert [(item.name, item.remaining_pct) for item in row.windows] == windows
 
 
+def test_existing_codexbar_key_yields_to_explicit_configuration(monkeypatch, tmp_path):
+    config = Path.home() / ".config/codexbar/config.json"
+    common.write_json(config, {"providers": [{"id": "zai", "apiKey": "codexbar-test-key", "enabled": True}]})
+    original = config.read_bytes()
+    for name in api.CODING_ENDPOINTS["zai-glm"][1]:
+        monkeypatch.delenv(name, raising=False)
+
+    requests = []
+
+    def get(url, headers):
+        requests.append((url, headers["Authorization"]))
+        return {"data": {"limits": [{"unit": 3, "percentage": 20}]}}
+
+    monkeypatch.setattr(api, "get_usage", get)
+    job, = api.coding_plan_jobs(tmp_path, "zai-glm")
+    assert job().account == "CodexBar"
+    monkeypatch.setenv("ZAI_CODING_PLAN_API_KEY", "explicit-test-key")
+    job, = api.coding_plan_jobs(tmp_path, "zai-glm")
+    assert job().account == "default"
+    (tmp_path / "providers.toml").write_text('[zai-glm.personal]\napi_key = "toml-test-key"\n')
+    job, = api.coding_plan_jobs(tmp_path, "zai-glm")
+    assert job().account == "personal"
+    url = api.CODING_ENDPOINTS["zai-glm"][0]
+    assert requests == [(url, key) for key in ("codexbar-test-key", "explicit-test-key", "toml-test-key")]
+    assert config.read_bytes() == original
+
+
+def test_kimi_cli_credentials_use_only_the_official_regional_host(monkeypatch, tmp_path):
+    monkeypatch.delenv("KIMI_CODE_HOME", raising=False)
+    config = tmp_path / ".kimi-code/config.toml"
+    config.parent.mkdir()
+    config.write_text('[providers."managed:kimi-code"]\nbase_url = "https://api.kimi.ai/coding/v1"\napi_key = "test-key"\n')
+    assert coding_credentials.local_coding_credential("kimi-coding", tmp_path) == (
+        "test-key", "Kimi CLI", "https://api.kimi.ai/coding/v1/usages",
+    )
+    config.write_text('[providers."managed:kimi-code"]\nbase_url = "https://api.kimi.ai.example.org/coding"\napi_key = "test-key"\n')
+    assert coding_credentials.local_coding_credential("kimi-coding", tmp_path) == ("", "-", None)
+
+
+def test_opencode_go_legacy_auth_and_unconfigured_row(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENCODE_DB", raising=False)
+    for name in api.CODING_ENDPOINTS["opencode-go"][1]:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(api, "get_usage", lambda *_: pytest.fail("unexpected request without a Go credential"))
+    auth = tmp_path / "opencode/auth.json"
+    common.write_json(auth, {"opencode": {"type": "api", "key": "legacy-zen-test-key"}})
+    job, = api.coding_plan_jobs(tmp_path, "opencode-go")
+    assert job().status == "unconfigured"
+    common.write_json(auth, {"opencode-go": {"type": "api", "key": "legacy-go-test-key"}})
+
+    def get(url, headers):
+        assert url == "https://opencode.ai/zen/go/v1/usage"
+        assert headers["Authorization"] == "Bearer legacy-go-test-key"
+        return {"usage": {"rolling": {"status": "rate-limited", "percent": 80},
+                          "weekly": {"percent": 10}, "monthly": {"percent": 20}}}
+
+    monkeypatch.setattr(api, "get_usage", get)
+    job, = api.coding_plan_jobs(tmp_path, "opencode-go")
+    row = job()
+    assert row.status == "ok" and row.account == "OpenCode"
+    assert [w.remaining_pct for w in row.windows] == [0, 90, 80]
+
+
+def test_opencode_go_current_database_selects_the_active_go_login(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    monkeypatch.delenv("OPENCODE_DB", raising=False)
+    directory = tmp_path / "opencode"
+    directory.mkdir()
+    database = directory / "opencode.db"
+    with sqlite3.connect(database) as db:
+        db.execute("CREATE TABLE credential (integration_id TEXT, active INTEGER, value TEXT)")
+        db.executemany("INSERT INTO credential VALUES (?, ?, ?)", [
+            ("opencode", 1, json.dumps({"type": "key", "key": "generic-test-key"})),
+            ("opencode-go", 0, json.dumps({"type": "key", "key": "inactive-test-key"})),
+            ("opencode-go", 1, json.dumps({"type": "oauth", "access": "fresh-test-token",
+                                          "expires": int(time.time() * 1000) + 60000})),
+        ])
+    original = database.read_bytes()
+    assert coding_credentials.local_coding_credential("opencode-go", tmp_path) == (
+        "fresh-test-token", "OpenCode", None,
+    )
+    assert database.read_bytes() == original
+    with sqlite3.connect(database) as db:
+        db.execute("UPDATE credential SET active = 1 WHERE integration_id = 'opencode-go'")
+    with pytest.raises(common.ProviderError, match="Multiple active OpenCode credentials"):
+        coding_credentials.local_coding_credential("opencode-go", tmp_path)
+
+
 def test_http_denial_does_not_expose_body_or_headers(monkeypatch):
     def fail(request, timeout):
         assert request.get_method() == "GET"
@@ -229,6 +319,16 @@ def test_http_denial_does_not_expose_body_or_headers(monkeypatch):
 
     monkeypatch.setattr(api, "build_opener", lambda *_: SimpleNamespace(open=fail))
     with pytest.raises(common.ProviderError, match=r"^HTTP 403: access denied or subscription unavailable$"):
+        api.get_usage(api.CODING_ENDPOINTS["opencode-go"][0], {"Authorization": "secret-from-header"})
+
+
+def test_opencode_entitlement_error_has_a_fixed_message(monkeypatch):
+    def fail(request, timeout):
+        body = io.BytesIO(b'{"error":{"type":"EntitlementError","message":"secret-from-body"}}')
+        raise HTTPError(request.full_url, 403, "Forbidden", {}, body)
+
+    monkeypatch.setattr(api, "build_opener", lambda *_: SimpleNamespace(open=fail))
+    with pytest.raises(common.ProviderError, match=r"^HTTP 403: OpenCode Go subscription required$"):
         api.get_usage(api.CODING_ENDPOINTS["opencode-go"][0], {"Authorization": "secret-from-header"})
 
 
