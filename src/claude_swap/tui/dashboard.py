@@ -18,7 +18,6 @@ No global command palette: actions live where their context is.
 from __future__ import annotations
 
 import asyncio
-import time
 from functools import partial
 from typing import TYPE_CHECKING, Callable
 
@@ -361,7 +360,6 @@ class WatchScreen(AccountListScreen):
         # External sources (external.toml): accounts listed after the Claude ones.
         self._sources = {s.name: s for s in external.load_sources()}
         self._external: dict[str, list[external.ExternalAccount]] = {}
-        self._fetched_at: dict[str, float] = {}
         self._fetching: set[str] = set()
         self._list_lock = asyncio.Lock()
 
@@ -370,23 +368,26 @@ class WatchScreen(AccountListScreen):
         self.query_one("#list-title", Static).update(self._title_text())
         super().on_mount()
         if self._sources:
+            # Paint the stored rows at once; runs happen in the background when due.
+            self._external = {name: external.stored(src) for name, src in self._sources.items()}
+            self.call_later(self._sync_external)
             self._external_tick()
             self.set_interval(5.0, self._external_tick)
 
     # -- external sources --------------------------------------------------------
 
     def _external_tick(self, force: bool = False) -> None:
-        now = time.time()
         for name, source in self._sources.items():
-            due = force or now - self._fetched_at.get(name, 0.0) >= source.every
-            if due and name not in self._fetching:
-                self._fetching.add(name)
-                self._fetched_at[name] = now
-                self.run_worker(partial(self._fetch_external, source), thread=True,
-                                group=f"external-{name}", exit_on_error=False)
+            if name in self._fetching:
+                continue
+            self._fetching.add(name)
+            self.run_worker(partial(self._fetch_external, source, force), thread=True,
+                            group=f"external-{name}", exit_on_error=False)
 
-    def _fetch_external(self, source: external.Source) -> None:
-        rows = external.fetch(source)
+    def _fetch_external(self, source: external.Source, force: bool) -> None:
+        # Serves the shared store while it is fresh (another screen may have just
+        # run the command); runs the command only when the entry is due.
+        rows = external.fetch(source, force=force)
         self.app.call_from_thread(self._external_loaded, source.name, rows)
 
     async def _external_loaded(self, name: str, rows: list[external.ExternalAccount]) -> None:
@@ -426,12 +427,15 @@ class WatchScreen(AccountListScreen):
 
     def _switch_external_blocking(self, source: external.Source, account: str) -> None:
         ok, message = external.switch(source, account)
+        if ok:
+            external.mark_active(source, account)  # usage is unchanged; only the marker moves
         self.app.call_from_thread(self._external_switched, source, ok, message)
 
     def _external_switched(self, source: external.Source, ok: bool, message: str) -> None:
         self.app.notify(message, title=f"{source.name} switch", severity="information" if ok else "error")
-        self._fetched_at[source.name] = 0.0
-        self._external_tick()
+        if ok:
+            self._external[source.name] = external.stored(source)
+            self.call_later(self._sync_external)
 
     def action_refresh_all(self) -> None:
         self.app.action_refresh_full()

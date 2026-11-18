@@ -577,6 +577,8 @@ def external_card_text(acc: "ExternalAccount", width: int, *, palette: Palette =
     for extra in (acc.plan, acc.note):
         if extra:
             text.append(f"  · {extra}", style=palette.muted)
+    if acc.fetched_at is not None and time.time() - acc.fetched_at >= 60:
+        text.append(f"  · {data.format_duration(time.time() - acc.fetched_at)} ago", style=palette.muted)
     label_w = max((len(w.name) for w in acc.windows), default=0)
     bar_w = max(10, min(40, width - len(indent) - label_w - 36))
     for w in acc.windows:

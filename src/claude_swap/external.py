@@ -25,13 +25,17 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+import time
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
+from claude_swap.fsutil import atomic_write_text, read_text_with_retry
 from claude_swap.paths import get_backup_root
 
 CONFIG_NAME = "external.toml"
+STORE_NAME = "external_store.json"
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
@@ -53,6 +57,7 @@ class ExternalAccount:
     error: str = ""
     windows: tuple[ExternalWindow, ...] = ()
     switchable: bool = False
+    fetched_at: float | None = None
 
     @property
     def key(self) -> tuple[str, str]:
@@ -113,23 +118,7 @@ def _last_line(proc: subprocess.CompletedProcess) -> str:
     return lines[-1][:160] if lines else f"exit {proc.returncode}"
 
 
-def fetch(source: Source) -> list[ExternalAccount]:
-    """Run the list command; any failure becomes one error row for the source."""
-    def failed(message: str) -> list[ExternalAccount]:
-        return [ExternalAccount(source.name, "-", error=message)]
-
-    try:
-        proc = _run(list(source.list_cmd), source.timeout)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return failed(f"{type(exc).__name__}: {exc}"[:160])
-    if proc.returncode != 0:
-        return failed(_last_line(proc))
-    try:
-        rows = json.loads(proc.stdout)
-    except ValueError:
-        return failed("list output is not JSON")
-    if not isinstance(rows, list):
-        return failed("list output is not a JSON array")
+def _parse(source: Source, rows: list, fetched_at: float | None) -> list[ExternalAccount]:
     accounts = []
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("account"), str):
@@ -152,8 +141,99 @@ def fetch(source: Source) -> list[ExternalAccount]:
             error=str(row.get("error") or ""),
             windows=windows,
             switchable=bool(source.switch_cmd) and row["account"] != "-",
+            fetched_at=fetched_at,
         ))
-    return accounts or failed("no accounts")
+    return accounts
+
+
+# -- the store: last good rows per source, shared by every cswap process ----------
+# Like the Claude usage store: screens paint from it at once, a run happens only
+# when the entry is older than the source's interval, an in-flight claim keeps two
+# processes from running the same command, and a failed run keeps the last rows.
+
+_store_lock = threading.Lock()
+
+
+def store_path() -> Path:
+    return get_backup_root() / STORE_NAME
+
+
+def _read_store() -> dict:
+    try:
+        data = json.loads(read_text_with_retry(store_path()))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _update_store(name: str, **fields) -> None:
+    with _store_lock:
+        data = _read_store()
+        entry = data.get(name) if isinstance(data.get(name), dict) else {}
+        entry.update(fields)
+        data[name] = entry
+        atomic_write_text(store_path(), json.dumps(data, ensure_ascii=False))
+
+
+def stored(source: Source) -> list[ExternalAccount]:
+    """The last good rows, without running anything (empty when never fetched)."""
+    entry = _read_store().get(source.name) or {}
+    rows = entry.get("rows")
+    return _parse(source, rows, entry.get("at")) if isinstance(rows, list) else []
+
+
+def due(source: Source, now: float | None = None) -> bool:
+    entry = _read_store().get(source.name) or {}
+    now = time.time() if now is None else now
+    fresh = now - float(entry.get("at") or 0) < source.every
+    claimed = now - float(entry.get("claimed_at") or 0) < source.timeout
+    return not fresh and not claimed
+
+
+def fetch(source: Source, *, force: bool = False) -> list[ExternalAccount]:
+    """Rows for the source: the store's while fresh or claimed, else a new run.
+
+    A failed run keeps the last good rows (with the error on the first) or, with
+    none stored, becomes one error row.
+    """
+    if not force and not due(source):
+        return stored(source)
+    _update_store(source.name, claimed_at=time.time())
+    error = ""
+    try:
+        proc = _run(list(source.list_cmd), source.timeout)
+        if proc.returncode != 0:
+            error = _last_line(proc)
+        else:
+            rows = json.loads(proc.stdout)
+            if not isinstance(rows, list) or not _parse(source, rows, None):
+                error = "list output has no accounts"
+    except (OSError, subprocess.SubprocessError) as exc:
+        error = f"{type(exc).__name__}: {exc}"[:160]
+    except ValueError:
+        error = "list output is not JSON"
+    if not error:
+        now = time.time()
+        _update_store(source.name, at=now, rows=rows, claimed_at=0)
+        return _parse(source, rows, now)
+    _update_store(source.name, claimed_at=0)
+    last = stored(source)
+    if not last:
+        return [ExternalAccount(source.name, "-", error=error)]
+    return [replace(last[0], error=error), *last[1:]]
+
+
+def mark_active(source: Source, account: str) -> None:
+    """After a switch, move the stored active flag so every screen shows it now."""
+    with _store_lock:
+        data = _read_store()
+        entry = data.get(source.name)
+        if not isinstance(entry, dict) or not isinstance(entry.get("rows"), list):
+            return
+        for row in entry["rows"]:
+            if isinstance(row, dict):
+                row["active"] = row.get("account") == account
+        atomic_write_text(store_path(), json.dumps(data, ensure_ascii=False))
 
 
 def switch(source: Source, account: str) -> tuple[bool, str]:
