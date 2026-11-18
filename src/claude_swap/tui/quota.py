@@ -5,19 +5,23 @@ from __future__ import annotations
 from datetime import datetime
 from functools import partial
 
+from rich.markup import escape
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Static
 
-from claude_swap.providers.common import KST, ProviderAccountQuota, ProviderError, home, quota_cells
+from claude_swap.providers.common import KST, ProviderAccountQuota, ProviderError, home, quota_cells, reset_credit_cells
 from claude_swap.providers.quota import SWITCHERS, collect_quota, invalidate_quota
+from claude_swap.providers.reset import OUTCOMES, RESET_PROVIDERS, ResetIntent, prepare_reset, redeem_reset
+from claude_swap.tui.modals import ConfirmModal
 
 
 class QuotaScreen(Screen):
     BINDINGS = [
         Binding("r", "refresh_quota", "Refresh"),
+        Binding("x", "reset_credit", "Use reset credit"),
         Binding("enter", "switch_selected", "Switch", priority=True),
         Binding("escape", "app.pop_screen", "Back"),
         *[Binding(str(i), f"switch_number({i})", show=False) for i in range(1, 10)],
@@ -69,12 +73,19 @@ class QuotaScreen(Screen):
             if row.active:
                 label = f"* {label}"
             status = f"{row.status}: {row.error}" if row.error else ""
-            for index, item in enumerate(row.windows or (None,)):
+            for index, item in enumerate(row.windows or (() if row.reset_credits else (None,))):
                 remaining, reset = quota_cells(item, now) if item else ("-", "-")
                 table.add_row(*map(Text, (
                     row.provider if index == 0 else "", label if index == 0 else "",
                     (row.plan or "-") if index == 0 else "", item.name if item else "-",
                     remaining, reset, status if index == 0 else "",
+                )))
+                self._table_accounts.append(row)
+            if row.reset_credits:
+                remaining, expiry, note = reset_credit_cells(row.reset_credits, now)
+                table.add_row(*map(Text, (
+                    "" if row.windows else row.provider, "" if row.windows else label, "",
+                    "Reset credits", remaining, expiry, note,
                 )))
                 self._table_accounts.append(row)
         if rows:
@@ -83,6 +94,57 @@ class QuotaScreen(Screen):
 
     def action_refresh_quota(self) -> None:
         self._refresh(True)
+
+    def action_reset_credit(self) -> None:
+        cursor = self.query_one(DataTable).cursor_row
+        if self._busy or self.app.busy or not 0 <= cursor < len(self._table_accounts):
+            return
+        row = self._table_accounts[cursor]
+        if row.provider not in RESET_PROVIDERS or not row.number:
+            self.notify("Select a Claude or Codex account", severity="warning")
+            return
+        self._busy = True
+        self.run_worker(partial(self._read_reset_offer, row), thread=True, exit_on_error=False)
+
+    def _read_reset_offer(self, row: ProviderAccountQuota) -> None:
+        try:
+            intent = prepare_reset(row.provider, row.number, switcher=self.app.switcher)
+        except Exception as exc:
+            error = str(exc) if isinstance(exc, ProviderError) else "Could not check reset credits"
+            self.app.call_from_thread(self._reset_done, error, False)
+        else:
+            self.app.call_from_thread(self._confirm_reset, intent)
+
+    def _confirm_reset(self, intent: ResetIntent) -> None:
+        if self.is_mounted and self.app.screen is self:
+            self.app.push_screen(
+                ConfirmModal(escape(intent.prompt()), title="Use reset credit", yes_label="Use credit", default_no=True),
+                partial(self._on_reset_confirmed, intent),
+            )
+        else:
+            self._busy = False
+
+    def _on_reset_confirmed(self, intent: ResetIntent, confirmed: bool | None) -> None:
+        if not confirmed:
+            self._busy = False
+            return
+        self.run_worker(partial(self._redeem, intent), thread=True, exit_on_error=False)
+
+    def _redeem(self, intent: ResetIntent) -> None:
+        try:
+            outcome = redeem_reset(intent, switcher=self.app.switcher)
+        except Exception as exc:
+            error = str(exc) if isinstance(exc, ProviderError) else "Could not use reset credit"
+            self.app.call_from_thread(self._reset_done, error, False)
+        else:
+            self.app.call_from_thread(self._reset_done, OUTCOMES[outcome], True)
+
+    def _reset_done(self, message: str, refresh: bool) -> None:
+        self._busy = False
+        if self.is_mounted:
+            self.notify(message, markup=False)
+            if refresh:
+                self._refresh(False)
 
     def action_switch_selected(self) -> None:
         cursor = self.query_one(DataTable).cursor_row

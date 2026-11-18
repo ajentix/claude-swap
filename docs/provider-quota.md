@@ -9,6 +9,22 @@ The table shows remaining quota, the active login (`*`), and reset times in KST.
 
 Quota results are cached per provider for 60 seconds in `~/.cswap/quota_cache.json`. Use `--refresh` for a measurement now. Requests go to subscription usage endpoints or the Antigravity `/usage` command. They never send a prompt. Claude plan names come from the existing subscription store, when available. A failed Claude fetch can show a previous reading marked `stale`.
 
+## Reset credits
+
+Claude and ChatGPT Codex subscription accounts show a **Reset credits** row when the provider reports a balance. The time in that row is the next credit expiration in KST. Claude can report banked credits before they are usable. A missing balance appears as `reset_credits: null` in quota JSON.
+
+```sh
+cswap quota --provider claude --provider codex --refresh
+cswap reset claude 2
+cswap reset codex personal
+```
+
+In the TUI, open **All Providers Quota**, select an account and press `x`. Review the account shown in the confirmation dialog. For scripts, use `--yes` to explicitly confirm and `--json` for the provider's outcome. A reset uses one credit on the selected account. It neither switches logins nor purchases credits.
+
+After a reset, the provider's quota cache is invalidated. If the outcome is unknown, check the provider's quota. To retry within 24 hours, repeat the same command with `--retry`. `cswap` keeps the exact credit and request ID for that retry. It stores pending requests locally in `~/.cswap/reset_requests/` and removes the credit identifier when the outcome is settled.
+
+Protocol references include [OpenAI Codex's reset client](https://github.com/openai/codex/blob/main/codex-rs/backend-client/src/client/rate_limit_resets.rs), [Claude reset usage and redemption in Sub2API](https://github.com/Wei-Shaw/sub2api/blob/main/backend/internal/service/claude_reset_redeem.go), [Juicebar's confirmed redemption](https://github.com/Rasalas/juicebar/pull/21) and [OpenCodex's retry fix](https://github.com/lidge-jun/opencodex/pull/3919).
+
 ## Local accounts
 
 After signing in with the provider CLI, save the login. Repeat after signing in to another account.

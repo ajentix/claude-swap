@@ -13,6 +13,7 @@ from .common import (
     ProviderAccountQuota, ProviderError, child_environment, display_text, email_label,
     jwt_claims, object_dict, objects, read_json, window, write_json,
 )
+from .reset_credits import CODEX_CREDITS_URL, codex_reset_inventory
 
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 
@@ -90,23 +91,40 @@ def parse_codex(data: dict, secrets: tuple[str, ...]) -> tuple:
     return tuple(windows), display_text(data.get("plan_type"), *secrets)
 
 
-def codex_quota(account: Account) -> ProviderAccountQuota:
-    row = ProviderAccountQuota("codex", account.label, account.number, account.active, True)
+def codex_oauth(account: Account) -> tuple[str | None, dict[str, str]]:
     tokens = object_dict(account.login.data.get("tokens"))
     access = tokens.get("access_token")
     if account.login.data.get("auth_mode") == "apikey" or not isinstance(access, str) or not access:
-        return replace(row, status="unavailable", error="API-key login has no ChatGPT subscription quota")
+        raise ProviderError("API-key login has no ChatGPT subscription quota")
     account_id = tokens.get("account_id")
     if not account_id:
         auth = object_dict(jwt_claims(access).get("https://api.openai.com/auth"))
         account_id = auth.get("chatgpt_account_id")
     headers = {"Authorization": f"Bearer {access}"}
-    if isinstance(account_id, str) and account_id:
+    if isinstance(account_id, str) and account_id and account_id.isascii() and account_id.isprintable():
         headers["ChatGPT-Account-Id"] = account_id
+        return account_id, headers
+    return None, headers
+
+
+def codex_quota(account: Account) -> ProviderAccountQuota:
+    row = ProviderAccountQuota("codex", account.label, account.number, account.active, True)
     try:
-        windows, plan = parse_codex(get_usage(USAGE_URL, headers), account.login.secrets)
-        if not any(item.remaining_pct is not None for item in windows):
+        _, headers = codex_oauth(account)
+    except ProviderError as exc:
+        return replace(row, status="unavailable", error=str(exc))
+    try:
+        raw = get_usage(USAGE_URL, headers)
+        windows, plan = parse_codex(raw, account.login.secrets)
+        credits, _ = codex_reset_inventory(object_dict(raw.get("rate_limit_reset_credits")))
+        if credits and credits.available_count and credits.next_expiry is None:
+            try:
+                details, _ = codex_reset_inventory(get_usage(CODEX_CREDITS_URL, headers, timeout=2))
+                credits = details or credits
+            except ProviderError:
+                pass  # The primary usage read still has the reported credit count.
+        if credits is None and not any(item.remaining_pct is not None for item in windows):
             raise ProviderError("Codex returned no quota windows")
-        return replace(row, windows=windows, plan=plan)
+        return replace(row, windows=windows, plan=plan, reset_credits=credits)
     except ProviderError as exc:
         return replace(row, status="error", error=str(exc))

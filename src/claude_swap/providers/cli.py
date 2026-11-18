@@ -9,8 +9,9 @@ from datetime import datetime
 
 from claude_swap.exceptions import LockError
 
-from .common import KST, ProviderAccountQuota, ProviderError, home, quota_cells
+from .common import KST, ProviderAccountQuota, ProviderError, home, quota_cells, reset_credit_cells
 from .quota import PROVIDERS, SWITCHERS, collect_quota, invalidate_quota, quota_payload
+from .reset import OUTCOMES, RESET_PROVIDERS, prepare_reset, redeem_reset
 
 
 def _print_rows(rows: list[ProviderAccountQuota], json_output: bool) -> None:
@@ -31,12 +32,18 @@ def _print_rows(rows: list[ProviderAccountQuota], json_output: bool) -> None:
     for row in rows:
         label = " ".join(filter(None, ("*" if row.active else None, row.number, row.account)))
         status = f"{row.status}: {row.error}" if row.error else row.status
-        for index, item in enumerate(row.windows or (None,)):
+        for index, item in enumerate(row.windows or (() if row.reset_credits else (None,))):
             remaining, reset = quota_cells(item, now) if item else ("-", "-")
             table.add_row(*map(Text, (
                 row.provider if index == 0 else "", label if index == 0 else "",
                 (row.plan or "-") if index == 0 else "", item.name if item else "-",
                 remaining, reset, status if index == 0 else "",
+            )))
+        if row.reset_credits:
+            remaining, expiry, note = reset_credit_cells(row.reset_credits, now)
+            table.add_row(*map(Text, (
+                "" if row.windows else row.provider, "" if row.windows else label, "",
+                "Reset credits", remaining, expiry, note,
             )))
     Console().print(table)
 
@@ -48,6 +55,37 @@ def quota_command(argv: list[str], prog: str) -> None:
     parser.add_argument("--refresh", action="store_true")
     args = parser.parse_args(argv)
     _print_rows(collect_quota(args.provider or PROVIDERS, refresh=args.refresh), args.json)
+
+
+def reset_command(argv: list[str], prog: str) -> int:
+    parser = argparse.ArgumentParser(prog=f"{prog} reset", description="Use one subscription reset credit")
+    parser.add_argument("provider", choices=RESET_PROVIDERS)
+    parser.add_argument("account", help="Account number, email or name from cswap quota")
+    parser.add_argument("--retry", action="store_true", help="Retry the same pending reset request")
+    parser.add_argument("--yes", action="store_true", help="Confirm the reset without a prompt")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    if not args.yes and not sys.stdin.isatty():
+        parser.error("Use --yes to explicitly confirm in non-interactive sessions")
+    try:
+        intent = prepare_reset(args.provider, args.account, retry=args.retry)
+        if not args.yes:
+            print(f"{intent.prompt()} [y/N] ", end="", file=sys.stderr, flush=True)
+            if input().strip().casefold() not in ("y", "yes"):
+                print(json.dumps({"status": "cancelled"}) if args.json else "Reset cancelled")
+                return 1
+        outcome = redeem_reset(intent)
+        message = OUTCOMES[outcome]
+    except (EOFError, KeyboardInterrupt):
+        outcome, message = "interrupted", "Interrupted. Check quota before trying again"
+    except (ProviderError, LockError, OSError, ValueError) as exc:
+        outcome = "error"
+        message = str(exc) if isinstance(exc, ProviderError) else "Could not access the local reset state"
+    if args.json:
+        print(json.dumps({"provider": args.provider, "status": outcome, "message": message}))
+    else:
+        print(message, file=sys.stdout if outcome == "reset" else sys.stderr)
+    return 0 if outcome in ("reset", "already_used", "already_redeemed") else 1
 
 
 def provider_command(provider: str, argv: list[str], prog: str) -> int:

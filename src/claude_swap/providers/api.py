@@ -26,10 +26,18 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def get_usage(url: str, headers: dict[str, str]) -> dict:
+def get_usage(url: str, headers: dict[str, str], *, timeout: float = 10) -> dict:
+    return _request_json(url, headers, timeout=timeout)
+
+
+def post_reset(url: str, headers: dict[str, str], payload: dict) -> dict:
+    return _request_json(url, {**headers, "Content-Type": "application/json"}, json.dumps(payload).encode())
+
+
+def _request_json(url: str, headers: dict[str, str], body: bytes | None = None, *, timeout: float = 10) -> dict:
     try:
-        request = Request(url, headers={"Accept": "application/json", "User-Agent": "claude-swap", **headers})
-        with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=10) as response:
+        request = Request(url, data=body, headers={"Accept": "application/json", "User-Agent": "claude-swap", **headers})
+        with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=timeout) as response:
             raw = response.read(1_048_577)
         if len(raw) > 1_048_576:
             raise ProviderError("Usage response exceeded the size limit")

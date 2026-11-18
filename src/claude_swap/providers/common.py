@@ -33,6 +33,14 @@ class QuotaWindow:
 
 
 @dataclass(frozen=True)
+class ResetCredits:
+    available_count: int
+    next_expiry: str | None = None
+    redeemable_count: int | None = None
+    cooldown_until: str | None = None
+
+
+@dataclass(frozen=True)
 class ProviderAccountQuota:
     provider: str
     account: str
@@ -43,6 +51,7 @@ class ProviderAccountQuota:
     windows: tuple[QuotaWindow, ...] = ()
     status: str = "ok"
     error: str | None = None
+    reset_credits: ResetCredits | None = None
 
 
 def home() -> Path:
@@ -143,6 +152,15 @@ def quota_cells(item: QuotaWindow, now: datetime) -> tuple[str, str]:
         blocks = round(item.remaining_pct / 10)
         remaining = f"{'█' * blocks}{'░' * (10 - blocks)} {item.remaining_pct:5.1f}%"
     return remaining, reset_clock(item.resets_at, now)
+
+
+def reset_credit_cells(credits: ResetCredits, now: datetime) -> tuple[str, str, str]:
+    reason = ""
+    if credits.cooldown_until:
+        reason = f"Cooldown until {reset_clock(credits.cooldown_until, now)}"
+    elif credits.available_count and credits.redeemable_count == 0:
+        reason = "Not usable yet"
+    return f"{credits.available_count} left", reset_clock(credits.next_expiry, now), reason
 
 
 def process_options() -> dict:

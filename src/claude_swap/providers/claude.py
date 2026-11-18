@@ -10,6 +10,15 @@ from claude_swap.switcher import ClaudeAccountSwitcher
 
 from .api import get_usage
 from .common import ProviderAccountQuota, ProviderError, display_text, object_dict, objects, window
+from .reset_credits import CLAUDE_USAGE_URL, claude_reset_inventory
+
+
+def claude_headers(credentials: str) -> dict[str, str]:
+    blob = oauth.extract_oauth_data(credentials) or {}
+    token = blob.get("accessToken")
+    if not isinstance(token, str) or not token or oauth.is_setup_token(blob):
+        raise ProviderError("Claude subscription OAuth login required")
+    return {"Authorization": f"Bearer {token}", "anthropic-beta": oauth.OAUTH_BETA_HEADER}
 
 
 def _windows(data: dict, *, stored: bool, secrets: tuple[str, ...]) -> tuple:
@@ -33,13 +42,12 @@ def _claude_row(row: ProviderAccountQuota, credentials: str, previous: dict) -> 
     if not isinstance(token, str) or not token or oauth.is_setup_token(blob):
         return replace(row, status="unavailable", error="Claude subscription OAuth login required")
     try:
-        raw = get_usage("https://api.anthropic.com/api/oauth/usage", {
-            "Authorization": f"Bearer {token}", "anthropic-beta": oauth.OAUTH_BETA_HEADER,
-        })
+        raw = get_usage(CLAUDE_USAGE_URL, claude_headers(credentials))
+        credits, _ = claude_reset_inventory(raw)
         windows = _windows(raw, stored=False, secrets=secrets)
-        if not any(item.remaining_pct is not None for item in windows):
+        if credits is None and not any(item.remaining_pct is not None for item in windows):
             raise ProviderError("Claude returned no quota windows")
-        return replace(row, windows=windows)
+        return replace(row, windows=windows, reset_credits=credits)
     except ProviderError as exc:
         stale = ()
         if previous.get("source") != oauth.USAGE_SOURCE_HEADERS:

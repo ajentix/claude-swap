@@ -1439,11 +1439,13 @@ def main() -> None:
     force_utf8_output()
     _use_native_tls()
     argv = sys.argv[1:]
-    if argv and argv[0] in {"quota", "agy", "codex"}:
-        from claude_swap.providers.cli import provider_command, quota_command
+    if argv and argv[0] in {"quota", "reset", "agy", "codex"}:
+        from claude_swap.providers.cli import provider_command, quota_command, reset_command
 
         if argv[0] == "quota":
             quota_command(argv[1:], _prog_name())
+        elif argv[0] == "reset":
+            sys.exit(reset_command(argv[1:], _prog_name()))
         else:
             sys.exit(provider_command(argv[0], argv[1:], _prog_name()))
         return
@@ -1512,6 +1514,7 @@ def main() -> None:
 Commands:
   %(prog)s help                       show this help
   %(prog)s quota                      show quotas across providers
+  %(prog)s reset <provider> <account> use one subscription reset credit
   %(prog)s agy <command>              manage Antigravity logins
   %(prog)s codex <command>            manage direct Codex logins
   %(prog)s list                       list managed accounts

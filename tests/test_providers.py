@@ -337,7 +337,7 @@ def test_claude_uses_only_usage_endpoint_and_ignores_header_probe_data(monkeypat
     row = common.ProviderAccountQuota("claude", "one@example.com")
 
     def get(url, headers):
-        assert url == "https://api.anthropic.com/api/oauth/usage"
+        assert url == "https://api.anthropic.com/api/oauth/usage?cedar_ember=1"
         assert headers["Authorization"] == "Bearer test-token"
         return {"five_hour": {"utilization": 11}, "limits": [
             {"scope": {"model": {"display_name": "Fable"}}, "percent": 43},

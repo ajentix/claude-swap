@@ -957,6 +957,46 @@ class TestDashboard:
             await pilot.press("escape")
             assert not isinstance(app.screen, quota.QuotaScreen)
 
+    async def test_quota_reset_cancel_and_confirm(self, tmp_path, monkeypatch):
+        from textual.widgets import DataTable
+
+        from claude_swap.providers.common import ProviderAccountQuota, ResetCredits
+        from claude_swap.providers.reset import ResetIntent, ResetOffer, ResetTarget
+        from claude_swap.tui import quota
+        from claude_swap.tui.modals import ConfirmModal
+
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        calls = []
+        row = ProviderAccountQuota("codex", "personal", "1", reset_credits=ResetCredits(1))
+        intent = ResetIntent(ResetTarget("codex", "1", "personal", "id", "work", {}), ResetOffer("opaque-id"), 0)
+
+        def redeem(pending, *, switcher):
+            assert pending is intent and switcher is fake
+            calls.append(pending)
+            return "reset"
+
+        monkeypatch.setattr(quota, "collect_quota", lambda **_: [row])
+        monkeypatch.setattr(quota, "prepare_reset", lambda *_, **__: intent)
+        monkeypatch.setattr(quota, "redeem_reset", redeem)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await pilot.press("p")
+            await app.workers.wait_for_complete()
+            assert app.screen.query_one(DataTable).row_count == 1
+            await pilot.press("x")
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmModal)
+            assert app.screen.focused.id == "no"
+            await pilot.press("enter")
+            assert not calls
+            await pilot.press("x")
+            await app.workers.wait_for_complete()
+            await pilot.press("y")
+            await app.workers.wait_for_complete()
+            assert calls == [intent]
+
     async def test_remove_menu_shows_alias_before_email(self, tmp_path):
         fake = FakeSwitcher(
             [

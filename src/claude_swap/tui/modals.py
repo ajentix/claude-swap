@@ -27,12 +27,13 @@ class ConfirmModal(ModalScreen[bool]):
     ]
 
     def __init__(
-        self, message: str, *, title: str = "Confirm", yes_label: str = "Yes"
+        self, message: str, *, title: str = "Confirm", yes_label: str = "Yes", default_no: bool = False
     ) -> None:
         super().__init__()
         self._title = title
         self._message = message
         self._yes_label = yes_label
+        self._default_no = default_no
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal-box"):
@@ -48,6 +49,10 @@ class ConfirmModal(ModalScreen[bool]):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.dismiss(event.button.id == "yes")
+
+    def on_mount(self) -> None:
+        if self._default_no:
+            self.query_one("#no", Button).focus()
 
     def action_confirm(self) -> None:
         self.dismiss(True)

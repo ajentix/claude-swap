@@ -15,7 +15,7 @@ from .agy import AgyAccounts, agy_quota
 from .api import CODING_ENDPOINTS, coding_plan_jobs
 from .claude import claude_jobs
 from .codex import CodexAccounts, codex_quota
-from .common import ProviderAccountQuota, ProviderError, QuotaWindow, home, object_dict, read_json, write_json
+from .common import ProviderAccountQuota, ProviderError, QuotaWindow, ResetCredits, home, object_dict, read_json, write_json
 
 PROVIDERS = ("claude", "agy", "codex", *CODING_ENDPOINTS)
 SWITCHERS = {"agy": AgyAccounts, "codex": CodexAccounts}
@@ -42,6 +42,8 @@ def _cached_rows(entry: dict, now: float) -> list[ProviderAccountQuota] | None:
         for raw in entry["rows"]:
             item = dict(raw)
             item["windows"] = tuple(QuotaWindow(**win) for win in item["windows"])
+            if item.get("reset_credits") is not None:
+                item["reset_credits"] = ResetCredits(**item["reset_credits"])
             rows.append(ProviderAccountQuota(**item))
         return rows
     except (KeyError, ValueError, TypeError):
