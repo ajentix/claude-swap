@@ -17,6 +17,8 @@ No global command palette: actions live where their context is.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from functools import partial
 from typing import TYPE_CHECKING, Callable
 
@@ -25,8 +27,9 @@ from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import Footer, ListView, Static
 
+from claude_swap import external
 from claude_swap.models import AccountsSnapshot
-from claude_swap.tui.widgets import AccountItem, AccountsPanel, MenuItem
+from claude_swap.tui.widgets import AccountItem, AccountsPanel, ExternalItem, MenuItem
 
 if TYPE_CHECKING:
     from claude_swap.tui.app import CswapApp
@@ -346,7 +349,7 @@ class WatchScreen(AccountListScreen):
     BINDINGS = [
         Binding("s", "toggle_select", "Switch"),
         Binding("enter", "select_highlighted", "Confirm", priority=True),
-        Binding("f", "app.refresh_full", "Refresh", show=False),
+        Binding("f", "refresh_all", "Refresh", show=False),
         Binding("escape,q", "back", "Back"),
         Binding("down,j", "nav_down", show=False),
         Binding("up,k", "nav_up", show=False),
@@ -355,11 +358,84 @@ class WatchScreen(AccountListScreen):
     def __init__(self) -> None:
         super().__init__()
         self._selecting = False
+        # External sources (external.toml): accounts listed after the Claude ones.
+        self._sources = {s.name: s for s in external.load_sources()}
+        self._external: dict[str, list[external.ExternalAccount]] = {}
+        self._fetched_at: dict[str, float] = {}
+        self._fetching: set[str] = set()
+        self._list_lock = asyncio.Lock()
 
     def on_mount(self) -> None:
         self.watch(self.app, "refresh_status", self._on_refresh_status)
         self.query_one("#list-title", Static).update(self._title_text())
         super().on_mount()
+        if self._sources:
+            self._external_tick()
+            self.set_interval(5.0, self._external_tick)
+
+    # -- external sources --------------------------------------------------------
+
+    def _external_tick(self, force: bool = False) -> None:
+        now = time.time()
+        for name, source in self._sources.items():
+            due = force or now - self._fetched_at.get(name, 0.0) >= source.every
+            if due and name not in self._fetching:
+                self._fetching.add(name)
+                self._fetched_at[name] = now
+                self.run_worker(partial(self._fetch_external, source), thread=True,
+                                group=f"external-{name}", exit_on_error=False)
+
+    def _fetch_external(self, source: external.Source) -> None:
+        rows = external.fetch(source)
+        self.app.call_from_thread(self._external_loaded, source.name, rows)
+
+    async def _external_loaded(self, name: str, rows: list[external.ExternalAccount]) -> None:
+        self._fetching.discard(name)
+        self._external[name] = rows
+        await self._sync_external()
+
+    async def _sync_external(self) -> None:
+        async with self._list_lock:
+            listview = self.query_one("#accounts", ListView)
+            wanted = [acc for name in self._sources for acc in self._external.get(name, [])]
+            items = list(listview.query(ExternalItem))
+            if [i.acc.key for i in items] == [a.key for a in wanted]:
+                for item, acc in zip(items, wanted):
+                    item.set_account(acc)
+                return
+            index = listview.index
+            for item in items:
+                await item.remove()
+            await listview.extend(ExternalItem(acc) for acc in wanted)
+            if self._selecting and index is not None:
+                listview.index = min(index, len(listview.children) - 1)
+
+    async def _on_snapshot(self, snap: AccountsSnapshot | None) -> None:
+        async with self._list_lock:
+            await super()._on_snapshot(snap)
+        await self._sync_external()  # a Claude rebuild clears the whole list
+
+    def _switch_external(self, acc: external.ExternalAccount) -> None:
+        source = self._sources.get(acc.source)
+        if source is None or not acc.switchable:
+            self.app.notify(f"{acc.source} is view-only", severity="warning")
+            return
+        self.app.notify(f"Switching {acc.source} to {acc.account}…", title="Switch")
+        self.run_worker(partial(self._switch_external_blocking, source, acc.account),
+                        thread=True, group=f"external-switch-{source.name}", exit_on_error=False)
+
+    def _switch_external_blocking(self, source: external.Source, account: str) -> None:
+        ok, message = external.switch(source, account)
+        self.app.call_from_thread(self._external_switched, source, ok, message)
+
+    def _external_switched(self, source: external.Source, ok: bool, message: str) -> None:
+        self.app.notify(message, title=f"{source.name} switch", severity="information" if ok else "error")
+        self._fetched_at[source.name] = 0.0
+        self._external_tick()
+
+    def action_refresh_all(self) -> None:
+        self.app.action_refresh_full()
+        self._external_tick(force=True)
 
     def _title_text(self) -> str:
         if self._selecting:
@@ -409,6 +485,9 @@ class WatchScreen(AccountListScreen):
         if isinstance(item, AccountItem):
             self.app.do_switch(item.number)
             self._set_selecting(False)  # stay here, keep watching
+        elif isinstance(item, ExternalItem):
+            self._switch_external(item.acc)
+            self._set_selecting(False)
 
     def action_select_highlighted(self) -> None:
         if self._selecting:

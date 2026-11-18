@@ -26,6 +26,7 @@ from claude_swap.tui import data
 from claude_swap.tui.theme import Palette
 
 if TYPE_CHECKING:
+    from claude_swap.external import ExternalAccount
     from claude_swap.tui.app import CswapApp
 
 _BAR_FILLED = "━"
@@ -560,3 +561,59 @@ class MenuItem(ListItem):
             item.add_class("menu-item-muted")
         super().__init__(item)
         self.action_id = action_id
+
+
+NL = chr(10)
+
+
+def external_card_text(acc: "ExternalAccount", width: int, *, palette: Palette = Palette.DARK) -> Text:
+    """An external source's account, drawn like a Claude card: header, then one bar per window."""
+    text = Text()
+    indent = " " * (len(acc.source) + 2)
+    text.append(f"{acc.source}  ", style=palette.muted)
+    text.append(acc.account, style=f"bold {palette.foreground}")
+    if acc.active:
+        text.append("  ● active", style=f"bold {palette.accent}")
+    for extra in (acc.plan, acc.note):
+        if extra:
+            text.append(f"  · {extra}", style=palette.muted)
+    label_w = max((len(w.name) for w in acc.windows), default=0)
+    bar_w = max(10, min(40, width - len(indent) - label_w - 36))
+    for w in acc.windows:
+        text.append(NL + indent)
+        if w.used_pct is None:
+            text.append(f"{w.name.ljust(label_w)} ", style=palette.muted)
+            text.append(bar_cells(None, bar_w, palette=palette))
+            text.append(f"  {w.note or 'unavailable'}", style=palette.sev_crit)
+            continue
+        suffix = " ".join(x for x in (f"resets {w.resets}" if w.resets else "", w.note) if x)
+        text.append(usage_bar(w.name.ljust(label_w), w.used_pct, suffix or None, bar_w, palette=palette))
+    if acc.error:
+        text.append(NL + indent)
+        text.append(acc.error, style=palette.sev_warn)
+    return text
+
+
+class ExternalCard(Static):
+    def __init__(self, acc: "ExternalAccount") -> None:
+        super().__init__()
+        self._acc = acc
+
+    def set_account(self, acc: "ExternalAccount") -> None:
+        self._acc = acc
+        self.refresh(layout=True)
+
+    def render(self) -> Text:
+        return external_card_text(self._acc, self.size.width or 80, palette=Palette.from_theme(self.app.current_theme))
+
+
+class ExternalItem(ListItem):
+    """ListView row for one external-source account, after the Claude accounts."""
+
+    def __init__(self, acc: "ExternalAccount") -> None:
+        super().__init__(ExternalCard(acc))
+        self.acc = acc
+
+    def set_account(self, acc: "ExternalAccount") -> None:
+        self.acc = acc
+        self.query_one(ExternalCard).set_account(acc)
