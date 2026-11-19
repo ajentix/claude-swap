@@ -241,4 +241,16 @@ def collect_quota(providers: Iterable[str] = PROVIDERS, *, refresh: bool = False
             for name in pending
         }
         _update_cache(path, changes)
-    return [row for name in names for row in rows[name] or ()]
+    return [_with_claude_inventory(row) for name in names for row in rows[name] or ()]
+
+
+def _with_claude_inventory(row: ProviderAccountQuota) -> ProviderAccountQuota:
+    """Claude rows show the reset credits the CLI identity read (claude_resets),
+    cached rows included: cswap's own usage read only ever sees 'not offered'."""
+    if row.provider != "claude":
+        return row
+    from .claude_resets import cached
+
+    email = row.account.rsplit("(", 1)[-1].rstrip(")") if row.account.endswith(")") else row.account
+    credits = cached(email)
+    return replace(row, reset_credits=credits) if credits is not None else row

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from claude_swap.exceptions import LockError
+
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
@@ -14,12 +16,33 @@ from .common import ProviderAccountQuota, ProviderError, ResetCredits, display_t
 from .reset_credits import CLAUDE_USAGE_URL, claude_reset_inventory
 
 
-def claude_headers(credentials: str) -> dict[str, str]:
+def claude_headers(credentials: str, *, cli_identity: bool = False) -> dict[str, str]:
+    """Usage-request headers. ``cli_identity`` sends the Claude Code CLI's
+    User-Agent, which the reset-credit inventory requires (see claude_resets)."""
     blob = oauth.extract_oauth_data(credentials) or {}
     token = blob.get("accessToken")
     if not isinstance(token, str) or not token or oauth.is_setup_token(blob):
         raise ProviderError("Claude subscription OAuth login required")
-    return {"Authorization": f"Bearer {token}", "anthropic-beta": oauth.OAUTH_BETA_HEADER}
+    headers = {"Authorization": f"Bearer {token}", "anthropic-beta": oauth.OAUTH_BETA_HEADER}
+    if cli_identity:
+        from .claude_resets import user_agent
+
+        headers["User-Agent"] = user_agent()
+    return headers
+
+
+def _with_inventory(row: ProviderAccountQuota, email: str, credentials: str, refresh: bool) -> ProviderAccountQuota:
+    """The reset credits the CLI identity sees, in place of the 'not offered'
+    cswap's own usage read gets; read anew on --refresh once the last is old."""
+    from . import claude_resets
+
+    if refresh and claude_resets.due(email):
+        try:
+            claude_resets.refresh(email, credentials)
+        except (ProviderError, OSError, ValueError, LockError):
+            pass
+    credits = claude_resets.cached(email)
+    return replace(row, reset_credits=credits) if credits is not None else row
 
 
 def _windows(data: dict, *, stored: bool, secrets: tuple[str, ...]) -> tuple:
@@ -100,6 +123,6 @@ def claude_jobs(switcher: ClaudeAccountSwitcher, *, refresh: bool = False) -> li
             switcher._account_is_switchable(number), display_text(subscription.plan_label(plan), *secrets),
         )
         entry = entries[number]
-        jobs.append(lambda row=row, creds=credentials, entry=entry:
-                    _usage_store_row(row, creds, entry, switcher._usage_store.clock(), refresh=refresh))
+        jobs.append(lambda row=row, creds=credentials, entry=entry, email=email: _with_inventory(
+            _usage_store_row(row, creds, entry, switcher._usage_store.clock(), refresh=refresh), email, creds, refresh))
     return jobs

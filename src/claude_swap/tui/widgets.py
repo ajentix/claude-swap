@@ -262,6 +262,7 @@ def account_card_text(
     login: str | None = "full",
     label_prefix: str = "",
     fixed_label_width: int | None = None,
+    reset_credits: dict | None = None,
 ) -> Text:
     """The full account card: header line + per-window bar rows. Each row's
     tick is the switch line that row is judged against: ``threshold`` on the
@@ -287,7 +288,7 @@ def account_card_text(
     for badge in _policy_badges(acc, "   "):
         text.append(badge, style=palette.muted)
     _append_plan(text, acc, "   ", palette, label_prefix.strip())
-    credits = acc.usage.last_good.get("reset_credits") if isinstance(acc.usage.last_good, dict) else None
+    credits = reset_credits or (acc.usage.last_good.get("reset_credits") if isinstance(acc.usage.last_good, dict) else None)
     if isinstance(credits, dict):
         text.append(f"   · {reset_credit_text(label_prefix.strip() or 'Claude', credits, now)}", style=palette.muted)
     age = data.format_age(acc.usage.age_s)
@@ -535,6 +536,7 @@ class AccountCard(Static):
         self._threshold = threshold
         self._extras: list = []  # (prefix, ExternalAccount) with this card's email
         self._prefix = ""  # product name before each Claude row ("Claude 7d") once a screen mixes products
+        self._reset_credits: dict | None = None  # from claude_resets, over the usage reading's own
         self._label_w: int | None = None  # label column shared by every card on the screen
 
     def set_account(self, acc: AccountSnapshot) -> None:
@@ -551,12 +553,17 @@ class AccountCard(Static):
             self._prefix, self._label_w = prefix, label_w
             self.refresh(layout=True)
 
+    def set_reset_credits(self, credits: dict | None) -> None:
+        if credits != self._reset_credits:
+            self._reset_credits = credits
+            self.refresh(layout=True)
+
     def render(self) -> Text:
         width = self.size.width or 80
         palette = Palette.from_theme(self.app.current_theme)
         card = fitted_card_text(
             self._acc, width, width, threshold=self._threshold, palette=palette,
-            label_prefix=self._prefix, fixed_label_width=self._label_w,
+            label_prefix=self._prefix, fixed_label_width=self._label_w, reset_credits=self._reset_credits,
             show_tag=self.app.tag_shown(self._acc),
         )
         if self._extras:
@@ -605,6 +612,9 @@ class AccountItem(ListItem):
 
     def set_grid(self, prefix: str, label_w: int | None) -> None:
         self.query_one(AccountCard).set_grid(prefix, label_w)
+
+    def set_reset_credits(self, credits: dict | None) -> None:
+        self.query_one(AccountCard).set_reset_credits(credits)
 
     def row_labels(self) -> list[str]:
         card = self.query_one(AccountCard)

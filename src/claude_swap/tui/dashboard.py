@@ -365,6 +365,7 @@ class WatchScreen(AccountListScreen):
     def __init__(self) -> None:
         super().__init__()
         self._selecting = False
+        self._claude_credits: dict[str, dict] = {}  # email -> reset credits (claude_resets)
         # External sources (external.toml): accounts listed after the Claude ones.
         self._sources = {s.name: s for s in external.load_sources()}
         self._external: dict[str, list[external.ExternalAccount]] = {}
@@ -375,12 +376,42 @@ class WatchScreen(AccountListScreen):
         self.watch(self.app, "refresh_status", self._on_refresh_status)
         self.query_one("#list-title", Static).update(self._title_text())
         super().on_mount()
+        self._claude_credits_tick()
+        self.set_interval(1800.0, self._claude_credits_tick)
         if self._sources:
             # Paint the stored rows at once; runs happen in the background when due.
             self._external = {name: external.stored(src) for name, src in self._sources.items()}
             self.call_later(self._sync_external)
             self._external_tick()
             self.set_interval(5.0, self._external_tick)
+
+    # -- Claude reset credits (claude_resets) --------------------------------------
+
+    def _claude_credits_tick(self) -> None:
+        self.run_worker(self._claude_credits_blocking, thread=True, group="claude-credits",
+                        exclusive=True, exit_on_error=False)
+
+    def _claude_credits_blocking(self) -> None:
+        from dataclasses import asdict
+
+        from claude_swap.providers import claude_resets
+
+        try:
+            accounts = [(email, creds) for _n, email, _, _, _a, creds, *_ in self.app.switcher._build_accounts_info()]
+        except Exception:
+            return
+        claude_resets.refresh_due(accounts)
+        credits = {}
+        for email, _creds in accounts:
+            cached = claude_resets.cached(email)
+            if cached is not None:
+                credits[email] = asdict(cached)
+        self.app.call_from_thread(self._claude_credits_loaded, credits)
+
+    def _claude_credits_loaded(self, credits: dict[str, dict]) -> None:
+        self._claude_credits = credits
+        for item in self.query_one("#accounts", ListView).query(AccountItem):
+            item.set_reset_credits(credits.get(item.email))
 
     # -- external sources --------------------------------------------------------
 
@@ -468,6 +499,7 @@ class WatchScreen(AccountListScreen):
                     wanted.extend(rest)
             for item in listview.query(AccountItem):
                 item.set_extras(merged.get(item.email, []))
+                item.set_reset_credits(self._claude_credits.get(item.email))
             # One label column for the whole screen: Claude rows read "Claude 7d"
             # beside "agy Gemini", and every bar, % and reset lines up.
             prefix = "Claude " if any(self._external.values()) else ""
