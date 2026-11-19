@@ -14,7 +14,7 @@ from claude_swap.tui import widgets
 
 ROWS = [
     {"account": "a@example.com", "active": True, "plan": None, "note": "", "error": "",
-     "windows": [{"name": "Claude 5h", "used_pct": 20.0, "resets": "17:00", "note": ""},
+     "windows": [{"name": "Claude 5h", "used_pct": 20.0, "resets_at": "2099-01-01T08:00:00Z", "note": ""},
                  {"name": "Claude 7d", "used_pct": None, "resets": None, "note": "blocked"}]},
     {"account": "b@example.com", "active": False, "windows": [{"name": "Gemini 7d", "used_pct": 100}]},
 ]
@@ -48,19 +48,78 @@ def runs(tmp_path, name="agy") -> int:
 
 
 class TestConfig:
-    def test_reads_sources_and_skips_invalid(self, root):
-        (root / external.CONFIG_NAME).write_text(
-            '[[source]]\nname = "agy"\nlist = ["x"]\nswitch = ["y", "{account}"]\n'
-            'every = 300\ntitle = "Antigravity"\nlabel = "agy"\nmerge = true\n\n'
-            '[[source]]\nname = "plans"\nlist = ["z"]\n\n'
-            '[[source]]\nname = "broken"\nlist = "not a list"\n', "utf-8")
-        agy, plans = external.load_sources()
-        assert (agy.name, agy.list_cmd, agy.switch_cmd, agy.every) == ("agy", ("x",), ("y", "{account}"), 300.0)
-        assert (agy.title, agy.label, agy.merge) == ("Antigravity", "agy", True)
-        assert (plans.title, plans.label, plans.merge, plans.switch_cmd) == ("plans", "", False, ())
+    def test_builtin_sources_without_a_file(self, root):
+        sources = external.load_sources()
+        assert [s.name for s in sources] == ["agy", "codex", "plans"]
+        assert all(s.providers and not s.list_cmd for s in sources)
+        assert [s.merge for s in sources] == [True, True, False]
 
-    def test_missing_file_means_no_sources(self, root):
-        assert external.load_sources() == []
+    def test_file_replaces_disables_and_adds(self, root):
+        (root / external.CONFIG_NAME).write_text(
+            '[[source]]\nname = "plans"\nlist = ["z"]\nevery = 30\n\n'
+            '[[source]]\nname = "codex"\nenabled = false\n\n'
+            '[[source]]\nname = "mine"\nlist = ["x"]\nswitch = ["y", "{account}"]\nlabel = "me"\nmerge = true\n\n'
+            '[[source]]\nname = "broken"\nlist = "not a list"\n', "utf-8")
+        agy, plans, mine = external.load_sources()
+        assert agy == external.BUILTIN[0]
+        assert (plans.list_cmd, plans.providers, plans.every, plans.title) == (("z",), (), 30.0, "Coding plans")
+        assert (mine.list_cmd, mine.switch_cmd, mine.label, mine.merge, mine.title) == (
+            ("x",), ("y", "{account}"), "me", True, "mine")
+
+
+class TestBuiltin:
+    def test_rows_from_providers(self, root, monkeypatch):
+        from claude_swap.providers import quota
+        from claude_swap.providers.common import ProviderAccountQuota, QuotaWindow, ResetCredits
+
+        rows = [
+            ProviderAccountQuota("agy", "a@example.com", "1", True, True, windows=(
+                QuotaWindow("Claude and GPT 5h", 80.0, "2099-01-01T08:00:00+00:00"),
+                QuotaWindow("Gemini 7d", None, None, disabled=True))),
+            ProviderAccountQuota("codex", "a@example.com", "1", False, True, plan="plus",
+                                 windows=(QuotaWindow("5h", 40.0),),
+                                 reset_credits=ResetCredits(available_count=2)),
+            ProviderAccountQuota("kimi-coding", "CodexBar", windows=(QuotaWindow("7d", 90.0),)),
+            ProviderAccountQuota("zai-glm", "-", status="unconfigured"),
+        ]
+        monkeypatch.setattr(quota, "collect_quota", lambda providers, refresh=False: [
+            r for r in rows if r.provider in providers])
+        agy, codex, plans = external.BUILTIN
+        (a,) = external.fetch(agy)
+        assert (a.account, a.active, a.switchable) == ("a@example.com", True, True)
+        assert [(w.name, w.used_pct, w.note) for w in a.windows] == [("Claude 5h", 20.0, ""), ("Gemini 7d", None, "blocked")]
+        assert a.windows[0].resets_at == "2099-01-01T08:00:00+00:00"
+        (c,) = external.fetch(codex)
+        assert (c.plan, c.note, [w.name for w in c.windows]) == ("plus", "2 reset credits", ["5h"])
+        (k,) = external.fetch(plans)  # the unconfigured plan stays hidden
+        assert (k.account, [w.name for w in k.windows], k.switchable) == ("kimi-coding", ["Kimi 7d"], False)
+
+    def test_nothing_configured_hides_the_source(self, root, monkeypatch):
+        from claude_swap.providers import quota
+        from claude_swap.providers.common import ProviderAccountQuota
+
+        monkeypatch.setattr(quota, "collect_quota", lambda providers, refresh=False: [
+            ProviderAccountQuota(p, "-", status="unconfigured") for p in providers])
+        assert external.fetch(external.BUILTIN[2]) == []
+
+    def test_switch_uses_the_login_store(self, root, monkeypatch):
+        from claude_swap.providers import quota
+
+        calls = []
+
+        class Store:
+            def __init__(self, _root):
+                pass
+
+            def switch(self, identifier):
+                calls.append(identifier)
+                return identifier
+
+        monkeypatch.setitem(quota.SWITCHERS, "codex", Store)
+        monkeypatch.setattr(quota, "invalidate_quota", lambda provider, root=None: calls.append(f"invalidate {provider}"))
+        assert external.switch(external.BUILTIN[1], "a@example.com") == (True, "Active codex account a@example.com")
+        assert calls == ["a@example.com", "invalidate codex"]
+        assert external.switch(external.BUILTIN[2], "kimi-coding") == (False, "plans is view-only")
 
 
 class TestStore:
@@ -129,6 +188,14 @@ class TestRows:
         assert lines[0].startswith("    agy Claude 5h   ") and "20%" in lines[0] and "agy active" in lines[0]
         assert lines[1].startswith("    agy Claude 7d   ") and "blocked" in lines[1]
         assert lines[0].index("━") == lines[1].index("─")  # bars start on the same column
+
+    def test_reset_reads_like_a_claude_row(self, root):
+        soon = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 2 * 3600 + 120))
+        acc = external.ExternalAccount("agy", "a@example.com", windows=(
+            external.ExternalWindow("Claude 5h", 10.0, external._iso(soon)),))
+        line = widgets.ext_rows(acc, "agy", 120, 14).plain.strip("\n")
+        assert "resets 2h 1m" in line or "resets 2h 2m" in line
+        assert " · " in line.split("resets", 1)[1]  # the clock follows, like "resets 2h 13m · 20:39"
 
     def test_card_header_and_full_window(self, root):
         acc = external.fetch(source(root))[1]

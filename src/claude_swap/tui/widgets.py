@@ -607,6 +607,28 @@ def _bar_width(width: int, label_w: int) -> int:
     return max(12, min(30, width - 42 - label_w))  # a Claude card's formula
 
 
+def _ext_suffix(acc: "ExternalAccount", w: "ExternalWindow", width: int, label_w: int, bar_w: int) -> str:
+    """The same suffix a Claude row gets: live countdown and clock where it fits,
+    "(!)" at the limit, "(ahead of pace)" on a weekly window."""
+    raw = {"pct": w.used_pct, "resets_at": w.resets_at}
+    now = time.time()
+    reset, reset_full = _reset_parts(raw, now) if w.resets_at else (None, None)
+    if reset is None and w.resets:
+        reset = reset_full = f"resets {w.resets}"
+    suffix = reset or ""
+    if reset_full and 4 + label_w + 1 + bar_w + 5 + 2 + len(reset_full) <= width:
+        suffix = reset_full
+    if w.used_pct >= 100:
+        suffix = f"{suffix}  (!)" if suffix else "(!)"
+    elif w.name.endswith("7d") and w.resets_at:
+        marker = _pace_suffix(raw, acc.fetched_at or now)
+        if marker:
+            suffix = f"{suffix}  {marker}" if suffix else marker
+    if w.note:
+        suffix = f"{suffix}  {w.note}" if suffix else w.note
+    return suffix
+
+
 def _row_label(prefix: str, window: "ExternalWindow") -> str:
     return f"{prefix} {window.name}".strip()
 
@@ -627,12 +649,8 @@ def ext_rows(acc: "ExternalAccount", prefix: str, width: int, label_w: int, *, p
             text.append(bar_cells(None, bar_w, palette=palette))
             text.append(f"  {w.note or 'unavailable'}", style=palette.muted)
         else:
-            suffix = f"resets {w.resets}" if w.resets else ""
-            if w.used_pct >= 100:
-                suffix = f"{suffix}  (!)" if suffix else "(!)"
-            if w.note:
-                suffix = f"{suffix}  {w.note}" if suffix else w.note
-            text.append(usage_bar(label, w.used_pct, suffix or None, bar_w, palette=palette))
+            text.append(usage_bar(label, w.used_pct, _ext_suffix(acc, w, width, label_w, bar_w) or None,
+                                  bar_w, palette=palette))
         if i == 0 and acc.active:
             text.append(f"   ● {prefix or acc.source} active", style=f"bold {palette.accent}")
     if acc.error:

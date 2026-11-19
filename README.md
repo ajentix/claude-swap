@@ -194,7 +194,7 @@ Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usag
 
 `cswap quota` shows remaining quota across Claude, Antigravity, Codex, Kimi Coding, z.ai and OpenCode Go. Open **All Providers Quota** with `p` in the TUI. See [provider setup and commands](docs/provider-quota.md).
 
-`cswap watch` can also show accounts from other tools beside your Claude accounts, drawn the same way and switchable with `s`: list them with a command that prints their usage as JSON. See [other accounts on the watch screen](docs/watch-external-sources.md).
+`cswap watch` shows your Antigravity, Codex and coding-plan limits beside your Claude accounts, drawn the same way and switchable with `s`; a login with the same email joins that Claude card. Nothing to configure for what cswap manages, and your own sources plug in with a command. See [other accounts on the watch screen](docs/watch-external-sources.md).
 
 ### Refresh expired tokens
 

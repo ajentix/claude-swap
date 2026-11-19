@@ -1,26 +1,34 @@
-"""External account sources shown on the watch screen, below the Claude accounts.
+"""Other accounts on the watch screen, drawn like the Claude accounts.
 
-A source is a pair of commands configured in ``<backup root>/external.toml``
-(``~/.claude-swap-backup/external.toml`` on Windows/macOS)::
+Built in, with no configuration: Antigravity and Codex logins (the ones
+``cswap agy``/``cswap codex`` manage, see ``providers/``) and the Kimi Coding,
+z.ai and OpenCode Go coding plans whose keys ``providers/api.py`` can find.
+Providers with nothing configured stay hidden.
+
+``<backup root>/external.toml`` (``~/.claude-swap-backup/external.toml`` on
+Windows/macOS) can replace a built-in source by name, turn one off, or add a
+source backed by your own commands::
 
     [[source]]
-    name = "agy"
-    title = "Antigravity"   # section heading (default: name)
-    label = "agy"           # row prefix, e.g. "agy Gemini"
-    merge = true            # show an account on the Claude card with the same email
-    list = ["py", "-X", "utf8", "C:/tools/agy_quota.py"]
-    switch = ["py", "-X", "utf8", "C:/tools/agy_switch.py", "{account}"]  # optional
-    every = 300     # seconds between list runs (default 120)
-    timeout = 240   # seconds before a run is abandoned (default 120)
+    name = "codex"
+    enabled = false
+
+    [[source]]
+    name = "plans"                 # replaces the built-in coding plans
+    title = "Coding plans"
+    list = ["python", "/path/to/plan_usage.py"]
+    switch = ["python", "/path/to/switch.py", "{account}"]   # optional
+    every = 120     # seconds between runs (default 120)
+    timeout = 120   # seconds before a run is abandoned (default 120)
 
 ``list`` prints a JSON array, one object per account::
 
-    {"account": "me@example.com", "active": true, "plan": "pro", "note": "",
-     "error": "", "windows": [{"name": "5h", "used_pct": 18.0, "resets": "17:49", "note": ""}]}
+    {"account": "me@example.com", "active": true, "plan": "pro", "note": "", "error": "",
+     "windows": [{"name": "Kimi 5h", "used_pct": 18.0, "resets_at": "2026-11-19T08:13:00Z", "note": ""}]}
 
-``used_pct`` is null for a window with no figure (its ``note`` says why).
+``used_pct`` is the share used (null: no figure, ``note`` says why);
+``resets_at`` is an ISO time or epoch seconds, drawn like a Claude reset.
 Secrets stay with the commands: cswap only sees the usage they print.
-Without ``switch`` the source is view-only.
 """
 
 from __future__ import annotations
@@ -32,6 +40,7 @@ import threading
 import time
 import tomllib
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 from claude_swap.fsutil import atomic_write_text, read_text_with_retry
@@ -46,8 +55,9 @@ _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 class ExternalWindow:
     name: str
     used_pct: float | None
-    resets: str | None = None
+    resets_at: str | None = None  # ISO UTC; drawn as "resets 2h 13m · 20:39"
     note: str = ""
+    resets: str | None = None  # a preformatted reset text, when no resets_at was given
 
 
 @dataclass(frozen=True)
@@ -70,13 +80,25 @@ class ExternalAccount:
 @dataclass(frozen=True)
 class Source:
     name: str
-    list_cmd: tuple[str, ...]
+    list_cmd: tuple[str, ...] = ()
     title: str = ""
     label: str = ""
     merge: bool = False
     switch_cmd: tuple[str, ...] = ()
     every: float = 120.0
     timeout: float = 120.0
+    providers: tuple[str, ...] = ()  # built-in providers/ instead of commands
+
+
+# Built-in sources, in display order. Antigravity and Codex logins carry an
+# email, so they join the Claude card with the same email.
+BUILTIN = (
+    Source("agy", title="Antigravity", label="agy", merge=True, every=300, timeout=240, providers=("agy",)),
+    Source("codex", title="Codex", label="Codex", merge=True, providers=("codex",)),
+    Source("plans", title="Coding plans", providers=("kimi-coding", "zai-glm", "opencode-go")),
+)
+# Window prefix per built-in provider ("Kimi 5h"), beside the source label.
+PRODUCT = {"kimi-coding": "Kimi", "zai-glm": "GLM", "opencode-go": "OpenCode"}
 
 
 def config_path() -> Path:
@@ -84,31 +106,36 @@ def config_path() -> Path:
 
 
 def load_sources(path: Path | None = None) -> list[Source]:
-    """Configured sources; an absent or unreadable file means none."""
+    """The built-in sources, as ``external.toml`` replaces, disables or adds to them."""
     try:
         with (path or config_path()).open("rb") as stream:
             raw = tomllib.load(stream)
     except (OSError, ValueError):
-        return []
-    sources = []
+        raw = {}
+    sources = {s.name: s for s in BUILTIN}
     for entry in raw.get("source", []):
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
             continue
-        name, cmd = entry.get("name"), entry.get("list")
-        if not isinstance(name, str) or not _is_cmd(cmd):
+        name = entry["name"]
+        if entry.get("enabled") is False:
+            sources.pop(name, None)
             continue
-        switch = entry.get("switch")
-        sources.append(Source(
-            name=name,
-            list_cmd=tuple(cmd),
-            title=str(entry.get("title") or name),
-            label=str(entry.get("label") or ""),
-            merge=bool(entry.get("merge", False)),
-            switch_cmd=tuple(switch) if _is_cmd(switch) else (),
-            every=float(entry.get("every", 120)),
-            timeout=float(entry.get("timeout", 120)),
-        ))
-    return sources
+        base = sources.get(name) or Source(name)
+        cmd, switch = entry.get("list"), entry.get("switch")
+        if _is_cmd(cmd):
+            base = replace(base, list_cmd=tuple(cmd), providers=(),
+                           switch_cmd=tuple(switch) if _is_cmd(switch) else ())
+        elif not base.providers:
+            continue  # a new source needs a list command
+        sources[name] = replace(
+            base,
+            title=str(entry.get("title") or base.title or name),
+            label=str(entry.get("label", base.label) or ""),
+            merge=bool(entry.get("merge", base.merge)),
+            every=float(entry.get("every", base.every)),
+            timeout=float(entry.get("timeout", base.timeout)),
+        )
+    return list(sources.values())
 
 
 def _is_cmd(value: object) -> bool:
@@ -136,8 +163,9 @@ def _parse(source: Source, rows: list, fetched_at: float | None) -> list[Externa
             ExternalWindow(
                 name=str(w.get("name", "")),
                 used_pct=float(w["used_pct"]) if isinstance(w.get("used_pct"), (int, float)) else None,
-                resets=str(w["resets"]) if w.get("resets") else None,
+                resets_at=_iso(w.get("resets_at")),
                 note=str(w.get("note") or ""),
+                resets=str(w["resets"]) if w.get("resets") else None,
             )
             for w in row.get("windows") or [] if isinstance(w, dict)
         )
@@ -149,7 +177,7 @@ def _parse(source: Source, rows: list, fetched_at: float | None) -> list[Externa
             note=str(row.get("note") or ""),
             error=str(row.get("error") or ""),
             windows=windows,
-            switchable=bool(source.switch_cmd) and row["account"] != "-",
+            switchable=(bool(source.switch_cmd) or bool(row.get("switchable"))) and row["account"] != "-",
             fetched_at=fetched_at,
         ))
     return accounts
@@ -210,17 +238,22 @@ def fetch(source: Source, *, force: bool = False) -> list[ExternalAccount]:
     _update_store(source.name, claimed_at=time.time())
     error = ""
     try:
-        proc = _run(list(source.list_cmd), source.timeout)
-        if proc.returncode != 0:
-            error = _last_line(proc)
+        if source.providers:
+            rows = _builtin_rows(source, force)  # empty: nothing configured, the source hides
         else:
-            rows = json.loads(proc.stdout)
-            if not isinstance(rows, list) or not _parse(source, rows, None):
-                error = "list output has no accounts"
+            proc = _run(list(source.list_cmd), source.timeout)
+            if proc.returncode != 0:
+                error = _last_line(proc)
+            else:
+                rows = json.loads(proc.stdout)
+                if not isinstance(rows, list) or not _parse(source, rows, None):
+                    error = "list output has no accounts"
     except (OSError, subprocess.SubprocessError) as exc:
         error = f"{type(exc).__name__}: {exc}"[:160]
     except ValueError:
         error = "list output is not JSON"
+    except Exception as exc:  # a built-in provider failing must not take the screen down
+        error = f"{source.name} lookup failed: {type(exc).__name__}"
     if not error:
         now = time.time()
         _update_store(source.name, at=now, rows=rows, claimed_at=0)
@@ -246,7 +279,9 @@ def mark_active(source: Source, account: str) -> None:
 
 
 def switch(source: Source, account: str) -> tuple[bool, str]:
-    """Run the switch command for one account: (ok, last output line)."""
+    """Switch one account: the provider's login store, or the switch command."""
+    if source.providers:
+        return _builtin_switch(source, account)
     if not source.switch_cmd:
         return False, f"{source.name} is view-only"
     cmd = [part.replace("{account}", account) for part in source.switch_cmd]
@@ -258,3 +293,73 @@ def switch(source: Source, account: str) -> tuple[bool, str]:
     if proc.returncode != 0:
         return False, _last_line(proc)
     return True, lines[-1][:160] if lines else f"switched {source.name} to {account}"
+
+
+# -- built-in providers --------------------------------------------------------------
+
+def _iso(value: object) -> str | None:
+    """ISO UTC from an ISO string or epoch seconds/milliseconds; None otherwise."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            moment = datetime.fromtimestamp(value / 1000 if value >= 1e11 else value, timezone.utc)
+        else:
+            moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+        return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _builtin_rows(source: Source, force: bool) -> list[dict]:
+    from claude_swap.providers.quota import collect_quota
+
+    rows = []
+    for row in collect_quota(source.providers, refresh=force):
+        if row.status == "unconfigured":
+            continue
+        account = row.account
+        if row.provider in PRODUCT:  # coding plans: name the plan, not the key's label
+            account = row.provider if account in ("-", "default", "CodexBar", "OpenCode", "Kimi CLI") \
+                else f"{row.provider} {account}"
+        product = PRODUCT.get(row.provider, "")
+        note = ""
+        credits = row.reset_credits
+        if credits and credits.available_count:
+            note = f"{credits.available_count} reset credit{'s' if credits.available_count != 1 else ''}"
+        rows.append({
+            "account": account,
+            "active": row.active,
+            "plan": row.plan,
+            "note": note,
+            "error": row.error or "",
+            "switchable": bool(row.switchable),
+            "windows": [{
+                "name": " ".join(x for x in (product, w.name.replace("Claude and GPT", "Claude")) if x),
+                "used_pct": None if w.remaining_pct is None else round(100 - w.remaining_pct, 1),
+                "resets_at": w.resets_at,
+                "note": "blocked" if w.disabled else "",
+            } for w in row.windows],
+        })
+    return rows
+
+
+def _builtin_switch(source: Source, account: str) -> tuple[bool, str]:
+    from claude_swap.exceptions import LockError
+    from claude_swap.providers.common import ProviderError, home
+    from claude_swap.providers.quota import SWITCHERS, invalidate_quota
+
+    switchers = [p for p in source.providers if p in SWITCHERS]
+    if not switchers:
+        return False, f"{source.name} is view-only"
+    provider = switchers[0]
+    try:
+        label = SWITCHERS[provider](home()).switch(account)
+    except ProviderError as exc:
+        return False, str(exc)
+    except (LockError, OSError, ValueError):
+        return False, "Could not access the local login store"
+    invalidate_quota(provider)
+    return True, f"Active {provider} account {label}"
