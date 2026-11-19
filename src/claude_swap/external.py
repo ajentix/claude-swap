@@ -91,11 +91,12 @@ class Source:
     providers: tuple[str, ...] = ()  # built-in providers/ instead of commands
 
 
-# Built-in sources, in display order. Antigravity and Codex logins carry an
-# email, so they join the Claude card with the same email.
+# Built-in sources, in display order, each in its own section: a product
+# switches on its own, so its accounts stay together (merge = true in
+# external.toml draws a same-email login on the Claude card instead).
 BUILTIN = (
-    Source("agy", title="Antigravity", label="agy", merge=True, every=300, timeout=240, providers=("agy",)),
-    Source("codex", title="Codex", label="Codex", merge=True, providers=("codex",)),
+    Source("agy", title="Antigravity", label="agy", every=300, timeout=240, providers=("agy",)),
+    Source("codex", title="Codex", label="Codex", providers=("codex",)),
     Source("plans", title="Coding plans", providers=("kimi-coding", "zai-glm", "opencode-go")),
 )
 # Window prefix per built-in provider ("Kimi 5h"), beside the source label.

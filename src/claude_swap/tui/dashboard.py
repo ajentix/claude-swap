@@ -338,6 +338,9 @@ class SwitchScreen(AccountListScreen):
         self.app.pop_screen()
 
 
+CLAUDE_HEADER = ("header", "claude")
+
+
 class WatchScreen(AccountListScreen):
     """Live monitor of every account, full detail, hands-off by default.
 
@@ -399,6 +402,26 @@ class WatchScreen(AccountListScreen):
         self._external[name] = rows
         await self._sync_external()
 
+    async def _sync_claude_header(self, listview: ListView, shown: bool) -> None:
+        """With other products listed, the Claude accounts get a section title too."""
+        first = listview.children[0] if listview.children else None
+        has = isinstance(first, ExternalHeader) and first.key == CLAUDE_HEADER
+        if shown and not has and listview.query(AccountItem):
+            index = listview.index
+            await listview.insert(0, [ExternalHeader(CLAUDE_HEADER[1], "Claude Code")])
+            if index is not None:
+                listview.index = index + 1
+        elif has and not shown:
+            await first.remove()
+
+    def _claude_offset(self) -> int:
+        listview = self.query_one("#accounts", ListView)
+        first = listview.children[0] if listview.children else None
+        return 1 if isinstance(first, ExternalHeader) and first.key == CLAUDE_HEADER else 0
+
+    def _active_index(self, snap: AccountsSnapshot) -> int:
+        return super()._active_index(snap) + self._claude_offset()
+
     async def _sync_external(self) -> None:
         async with self._list_lock:
             listview = self.query_one("#accounts", ListView)
@@ -432,7 +455,8 @@ class WatchScreen(AccountListScreen):
             for item in listview.query(AccountItem):
                 item.set_grid(prefix, label_w)
             keys = [w[:2] if isinstance(w, tuple) else w.key for w in wanted]
-            items = list(listview.query(ExternalRow))
+            items = [i for i in listview.query(ExternalRow) if i.key != CLAUDE_HEADER]
+            await self._sync_claude_header(listview, bool(wanted))
             if [i.key for i in items] == keys:
                 for item, w in zip(items, wanted):
                     if isinstance(item, ExternalItem):

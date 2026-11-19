@@ -52,7 +52,7 @@ class TestConfig:
         sources = external.load_sources()
         assert [s.name for s in sources] == ["agy", "codex", "plans"]
         assert all(s.providers and not s.list_cmd for s in sources)
-        assert [s.merge for s in sources] == [True, True, False]
+        assert [s.merge for s in sources] == [False, False, False]
 
     def test_file_replaces_disables_and_adds(self, root):
         (root / external.CONFIG_NAME).write_text(
