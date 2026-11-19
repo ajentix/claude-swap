@@ -194,6 +194,8 @@ Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usag
 
 `cswap quota` shows remaining quota across Claude, Antigravity, Codex, Kimi Coding, z.ai and OpenCode Go. Open **All Providers Quota** with `p` in the TUI. See [provider setup and commands](docs/provider-quota.md).
 
+`cswap watch` can also show accounts from other tools beside your Claude accounts, drawn the same way and switchable with `s`: list them with a command that prints their usage as JSON. See [other accounts on the watch screen](docs/watch-external-sources.md).
+
 ### Refresh expired tokens
 
 If an account's token expires, log back into Claude Code with that account and re-run:
@@ -423,6 +425,8 @@ cswap add-token --email user@example.com     # optional label override
 - [docs/auto-switch.md](https://github.com/realiti4/claude-swap/blob/main/docs/auto-switch.md) — the exact auto-switch rules: hysteresis margins, landing rules, per-account thresholds and tiers, polling cadence. Read it to find out why it did or didn't switch.
 - [docs/json-output.md](https://github.com/realiti4/claude-swap/blob/main/docs/json-output.md) — every field in `--json` output, including the optional ones. Read it before writing a script against `cswap list --json` or `cswap auto --json`.
 - [docs/menubar.md](https://github.com/realiti4/claude-swap/blob/main/docs/menubar.md) — how the macOS menu bar runs under launchd: start at login, the wrapper app in `/Applications`, file locations, upgrades, the Login Items switch. Read it when the icon is missing or the service misbehaves.
+
+- [docs/watch-external-sources.md](docs/watch-external-sources.md) — `external.toml`: show and switch other tools' accounts on `cswap watch`. Read it to add a source.
 
 `cswap --help` and `cswap <command> --help` document every flag.
 

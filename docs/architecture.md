@@ -24,6 +24,7 @@ It works on the same files and Keychain items Claude Code uses, and takes Claude
 - `autoswitch.py`: `AutoSwitchEngine`. Decides when to switch and reports through typed events; it never prints. `lines.py` holds the per-window switch lines.
 - `session.py`: `SessionManager`, behind `cswap run`. `mappings.py` maps a directory to an account.
 - `usage_store.py`: `UsageStore`, the per-account usage table. `poll_policy.py` holds every polling number. `snapshot_source.py` is the read path for dashboards.
+- `external.py`: external account sources for the watch screen (`external.toml`): runs their list and switch commands and keeps the last rows in a shared store. `tui/widgets.py` draws them; `tui/dashboard.py` (`WatchScreen`) places them after, or onto, the Claude cards.
 - `providers/`: subscription quota adapters and native Antigravity and Codex login operations. The quota collector uses Claude's roster and stored plan metadata, and only calls subscription usage endpoints for fresh Claude readings.
 - `oauth.py`: the token, usage and profile endpoints, the header probe, and the formatting of reset times. `subscription.py` reads the plan label; `pace.py` computes the weekly pace marker.
 - `transfer.py`: export and import. `settings.py`: `settings.json`. `migrations.py`: one-time data migrations. `update_check.py`: the PyPI version check.
