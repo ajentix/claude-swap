@@ -687,7 +687,9 @@ def ext_header_bits(acc: "ExternalAccount", prefix: str, *, palette: Palette = P
     if acc.active:
         text.append(f"   ● {product} active", style=f"bold {palette.accent}")
     if acc.plan:
-        text.append(f"   · {product} {_plan_text(acc.plan)}", style=palette.muted)
+        plan = _plan_text(acc.plan)
+        named = plan if plan.casefold().startswith(product.casefold()) else f"{product} {plan}"
+        text.append(f"   · {named}", style=palette.muted)
     if acc.note:
         text.append(f"   · {product} {acc.note}", style=palette.muted)
     return text

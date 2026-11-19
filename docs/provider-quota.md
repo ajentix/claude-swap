@@ -44,6 +44,20 @@ Antigravity uses Credential Manager on Windows and Keychain on macOS. Saved logi
 
 Codex uses the direct CLI login in `~/.codex/auth.json` and saves profiles in `~/.cswap/codex/`. Use file-based Codex authentication for this workflow. ChatGPT OAuth logins have subscription quota. API-key logins can be saved and switched and show quota as unavailable.
 
+Saved Codex logins stay usable: when one is more than 8 days past its last refresh, its access token is about to expire, or a usage read returns 401, cswap refreshes it the way the Codex CLI does and writes the new tokens to that profile, only if the file still holds the token it used. The live `~/.codex/auth.json` login is never refreshed by cswap, because a running Codex owns it and refresh tokens work once. A spent token shows `Codex login expired`: sign in with `codex`, then run `cswap codex add` again.
+
+### Automatic Codex switching
+
+```sh
+cswap codex auto                        # check every 60s, switch before a limit
+cswap codex auto --threshold 85         # 5-hour line
+cswap codex auto --weekly-threshold 97  # weekly line (default: the same)
+cswap codex auto --once --json          # one check for a scheduler; exit 0 switched, 1 error, 2 nothing, 3 blocked
+cswap codex auto --dry-run
+```
+
+It follows `cswap auto`'s `best` rules: the active login leaves when a window reaches its line and lands on the saved login with the most room under every line, at least 10 points of it; when every login is over its lines it moves only to one with clearly more left. A 5-minute cooldown follows each switch. Running Codex sessions keep their login, new ones start on the new login, and a session running across the switch cannot undo it.
+
 `switch` saves the outgoing login before installing the selected one. `run` launches the CLI with a temporary profile and passes it the arguments after `--`. The user chooses the CLI action executed by `run`. Stashed files contain credentials and should be kept private. In the Textual quota screen, use `r` to refresh, arrows and Enter to switch, or the displayed number keys for the first nine inactive switchable accounts.
 
 ## Coding plans

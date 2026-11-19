@@ -210,6 +210,9 @@ def test_coding_plan_quota_parsing(monkeypatch, tmp_path, provider, response, wi
     monkeypatch.setenv("TEST_PROVIDER_KEY", "test-key")
 
     def get(url, headers):
+        if provider == "zai-glm" and url == api.ZAI_SUBSCRIPTIONS_URL:
+            assert headers["Authorization"] == "test-key"
+            return {"data": []}
         assert url == api.CODING_ENDPOINTS[provider][0]
         assert headers["Authorization"] == ("test-key" if provider == "zai-glm" else "Bearer test-key")
         if provider == "opencode-go":
@@ -246,7 +249,7 @@ def test_existing_codexbar_key_yields_to_explicit_configuration(monkeypatch, tmp
     job, = api.coding_plan_jobs(tmp_path, "zai-glm")
     assert job().account == "personal"
     url = api.CODING_ENDPOINTS["zai-glm"][0]
-    assert requests == [(url, key) for key in ("codexbar-test-key", "explicit-test-key", "toml-test-key")]
+    assert [r for r in requests if r[0] == url] == [(url, key) for key in ("codexbar-test-key", "explicit-test-key", "toml-test-key")]
     assert config.read_bytes() == original
 
 
@@ -389,3 +392,17 @@ def test_legacy_list_keeps_accounts_contract(monkeypatch, capsys):
     assert payload["schemaVersion"] == 1
     assert payload["accounts"] == []
     assert "activeAccountNumber" in payload
+
+
+def test_zai_plan_is_the_subscription_product_name(monkeypatch, tmp_path):
+    (tmp_path / "providers.toml").write_text("[zai-glm.personal]\napi_key_env = 'TEST_PROVIDER_KEY'\n")
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "test-key")
+
+    def get(url, headers):
+        if url == api.ZAI_SUBSCRIPTIONS_URL:
+            return {"data": [{"productName": "GLM Coding Pro", "valid": "true"}]}
+        return {"data": {"level": "pro", "limits": [{"unit": 3, "number": 5, "percentage": 10}]}}
+
+    monkeypatch.setattr(api, "get_usage", get)
+    job, = api.coding_plan_jobs(tmp_path, "zai-glm")
+    assert job().plan == "GLM Coding Pro"

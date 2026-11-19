@@ -70,6 +70,20 @@ def _request_json(url: str, headers: dict[str, str], body: bytes | None = None, 
     return data
 
 
+ZAI_SUBSCRIPTIONS_URL = "https://api.z.ai/api/biz/subscription/list"
+
+
+def zai_plan_name(headers: dict[str, str]) -> str | None:
+    """The plan's product name ("GLM Coding Pro"); the quota endpoint only has a level."""
+    try:
+        data = get_usage(ZAI_SUBSCRIPTIONS_URL, headers)
+    except ProviderError:
+        return None
+    names = [display_text(item.get("productName")) for item in objects(data.get("data"))
+             if str(item.get("valid", "true")).lower() not in ("false", "0")]
+    return next((n for n in names if n), None)
+
+
 def kimi_usage(data: dict, key: str) -> tuple:
     data = object_dict(data.get("data")) or data
     pools = object_dict(data.get("usages"))
@@ -167,6 +181,7 @@ def _coding_plan_row(provider: str, label: str, url: str, settings: dict) -> Pro
             windows, plan = kimi_usage(data, key)
         elif provider == "zai-glm":
             windows, plan = zai_usage(data, key)
+            plan = zai_plan_name(headers) or plan
         else:
             windows, plan = opencode_usage(data, key, session)
         if not any(item.remaining_pct is not None for item in windows):

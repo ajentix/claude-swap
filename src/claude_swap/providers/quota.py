@@ -80,7 +80,7 @@ def _jobs(provider: str, root: Path, switcher=None) -> list[Callable[[], Provide
         accounts, error = store.roster()
         jobs = [
             (lambda account=account: agy_quota(store, account)) if provider == "agy"
-            else (lambda account=account: codex_quota(account)) for account in accounts
+            else (lambda account=account: codex_quota(account, store)) for account in accounts
         ]
         if error:
             jobs.append(lambda: ProviderAccountQuota(provider, "-", status="error", error=error))

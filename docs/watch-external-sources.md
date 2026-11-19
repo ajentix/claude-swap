@@ -1,14 +1,21 @@
 # Other accounts on the watch screen
 
-`cswap watch` shows your other AI subscriptions beside your Claude accounts, drawn the same way: one bar per rate-limit window, the same columns, the same `resets 2h 13m · 20:39` countdown and `(ahead of pace)` marker. An Antigravity or Codex login with the same email as a Claude account joins that account's card; `s` and Enter switch it too.
+`cswap watch` shows your other AI subscriptions beside your Claude accounts, a section per product, drawn the same way: each account's header names the product (`● Codex active · Codex Plus`), then one bar per rate-limit window with the same columns, the same `resets 2h 13m · 20:39` countdown and `(ahead of pace)` marker. `s` and Enter switch any of them.
 
 ```
- 1  you@example.com  ● active · Ultra
+Claude Code
+ 1  you@example.com   ● Claude active   · Claude Ultra
     Claude 7d      ━━━━━━━━━━━━━━━━━━━━──────────  64%  resets 18m · 13:00
     Claude Fable   ━━━━──────────────────────────  15%  resets 18m · 13:00
+
+Antigravity
+    you@example.com   ● agy active
     agy Claude 5h  ──────────────────────────────   0%  resets 4h 59m · 17:41
     agy Gemini 7d  ━━━━━━━━━━────────────────────  32%  resets 5d 19h · Nov 25 08:38  (ahead of pace)
-    Codex 5h       ──────────────────────────────   0%  resets 4h 59m · 17:41   ● Codex active
+
+Codex
+    you@example.com   ● Codex active   · Codex Plus
+    Codex 5h       ──────────────────────────────   0%  resets 4h 59m · 17:41
     Codex 7d       ──────────────────────────────   1%  resets 4d 3h · Nov 23 16:00
 
 Coding plans
@@ -41,9 +48,12 @@ title = "Coding plans"
 list = ["python", "/path/to/plan_usage.py"]
 
 [[source]]
+name = "agy"
+merge = true               # draw each login on the Claude card with the same email
+
+[[source]]
 name = "mine"
 label = "mine"             # row prefix: "mine 5h"
-merge = true               # same email as a Claude account: draw it on that card
 list = ["python", "/path/to/usage.py"]
 switch = ["python", "/path/to/switch.py", "{account}"]
 every = 300                # seconds between runs of the list command (default 120)
@@ -64,5 +74,5 @@ The list command prints a JSON array, one object per account:
 
 - **Fast to open.** The last rows of every source are kept in `external_store.json` in the backup root. The watch screen paints them at once, with their age, and reads a source again only when its rows are older than `every` (Antigravity 5 minutes, since each reading starts the Antigravity CLI once per account; the others 2 minutes). Several `cswap watch` windows share one reading.
 - **Failures keep the last rows.** A reading that fails leaves the previous rows on screen with the error added.
-- **Switching.** Enter on an account switches it. On a card that holds more than one product, Enter asks which to switch: Claude Code, the other product, or all. After a switch the active marker moves at once; usage is not re-read.
+- **Switching.** Enter on an account switches it. On a merged card (`merge = true`) Enter asks which to switch: Claude Code, the other product, or all. After a switch the active marker moves at once; usage is not re-read. Antigravity applies a switch to new `agy` sessions; restart a running one. Codex can also switch on its own: `cswap codex auto`.
 - **Your secrets stay where they are.** Built-in providers read the stores described in [provider setup](provider-quota.md); your own commands keep their keys to themselves, cswap only reads what they print.

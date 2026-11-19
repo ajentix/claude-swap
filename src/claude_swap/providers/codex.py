@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import ProxyHandler, Request, build_opener
 
 from .accounts import Account, LocalAccounts, Login
 from .api import get_usage
 from .common import (
     ProviderAccountQuota, ProviderError, child_environment, display_text, email_label,
-    jwt_claims, object_dict, objects, read_json, window, write_json,
+    home, jwt_claims, object_dict, objects, read_json, window, write_json,
 )
 from .reset_credits import CODEX_CREDITS_URL, codex_reset_inventory
 
@@ -19,6 +23,15 @@ USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 # The reset-credit detail call wants the headers the Codex desktop app sends
 # (openai/codex, CodexBar, OpenUsage).
 CREDIT_HEADERS = {"OpenAI-Beta": "codex-1", "originator": "Codex Desktop"}
+
+# Token refresh, as the Codex CLI does it (openai/codex codex-rs/login): a JSON
+# POST with its public client id; tokens rotate, so a refresh token works once.
+REFRESH_URL = "https://auth.openai.com/oauth/token"
+CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+REFRESH_AFTER_S = 8 * 86400  # the CLI's TOKEN_REFRESH_INTERVAL
+EXPIRY_SKEW_S = 300
+RELOGIN_CODES = {"refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated", "invalid_grant"}
+RELOGIN = "Codex login expired. Sign in with codex, then run cswap codex add"
 
 
 def window_label(seconds: object, default: str) -> str:
@@ -127,14 +140,89 @@ def codex_oauth(account: Account) -> tuple[str | None, dict[str, str]]:
     return None, headers
 
 
-def codex_quota(account: Account) -> ProviderAccountQuota:
-    row = ProviderAccountQuota("codex", account.label, account.number, account.active, True)
+def _refresh_due(data: dict, now: float) -> bool:
+    tokens = object_dict(data.get("tokens"))
+    exp = jwt_claims(tokens.get("access_token")).get("exp")
+    if type(exp) in (int, float) and exp - now < EXPIRY_SKEW_S:
+        return True
     try:
+        last = datetime.fromisoformat(str(data.get("last_refresh")).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return False
+    return now - last > REFRESH_AFTER_S
+
+
+def _post_refresh(refresh_token: str) -> dict:
+    body = json.dumps({"grant_type": "refresh_token", "client_id": CLIENT_ID, "refresh_token": refresh_token}).encode()
+    request = Request(REFRESH_URL, data=body, headers={
+        "Content-Type": "application/json", "Accept": "application/json", "User-Agent": "claude-swap"})
+    try:
+        with build_opener(ProxyHandler({})).open(request, timeout=45) as response:
+            data = json.loads(response.read(1_048_576))
+    except HTTPError as exc:
+        with exc:
+            try:
+                err = json.loads(exc.read(4096))
+            except (OSError, ValueError):
+                err = {}
+        detail = object_dict(err.get("error")) if isinstance(err.get("error"), dict) else err
+        code = detail.get("code") or err.get("error")
+        if exc.code == 401 or code in RELOGIN_CODES:
+            raise ProviderError(RELOGIN) from None
+        raise ProviderError(f"Codex token refresh failed (HTTP {exc.code})") from None
+    except (URLError, OSError, ValueError):
+        raise ProviderError("Codex token refresh unavailable") from None
+    if not isinstance(data, dict) or not isinstance(data.get("access_token"), str):
+        raise ProviderError("Codex token refresh returned no token")
+    return data
+
+
+def refresh_saved(account: Account, store: "CodexAccounts") -> Account:
+    """Refresh a saved, inactive login and write it back to its own file.
+
+    Never the live ~/.codex login: a running Codex CLI owns that one, and a
+    second refresh would burn its single-use refresh token. The file is reread
+    under the store lock and only written if it still holds the token we used.
+    """
+    if account.active or account.path is None:
+        return account
+    tokens = object_dict(account.login.data.get("tokens"))
+    refresh_token = tokens.get("refresh_token")
+    if not isinstance(refresh_token, str) or not refresh_token:
+        raise ProviderError(RELOGIN)
+    fresh = _post_refresh(refresh_token)
+    with store._lock():
+        current = read_json(account.path) or {}
+        if object_dict(current.get("tokens")).get("refresh_token") != refresh_token:
+            raise ProviderError("The saved Codex login changed during refresh. Try again")
+        merged = {**object_dict(current.get("tokens"))}
+        for key in ("id_token", "access_token", "refresh_token"):
+            if isinstance(fresh.get(key), str) and fresh[key]:
+                merged[key] = fresh[key]
+        current["tokens"] = merged
+        current["last_refresh"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        write_json(account.path, current)
+    return replace(account, login=store.parse(current))
+
+
+def codex_quota(account: Account, store: "CodexAccounts | None" = None) -> ProviderAccountQuota:
+    row = ProviderAccountQuota("codex", account.label, account.number, account.active, True)
+    store = store or CodexAccounts(home())
+    try:
+        if not account.active and account.path is not None and _refresh_due(account.login.data, time.time()):
+            account = refresh_saved(account, store)
         _, headers = codex_oauth(account)
     except ProviderError as exc:
         return replace(row, status="unavailable", error=str(exc))
     try:
-        raw = get_usage(USAGE_URL, headers)
+        try:
+            raw = get_usage(USAGE_URL, headers)
+        except ProviderError as exc:
+            if not str(exc).startswith("HTTP 401") or account.active or account.path is None:
+                raise
+            account = refresh_saved(account, store)  # one retry with a fresh token
+            _, headers = codex_oauth(account)
+            raw = get_usage(USAGE_URL, headers)
         windows, plan = parse_codex(raw, account.login.secrets)
         credits, _ = codex_reset_inventory(object_dict(raw.get("rate_limit_reset_credits")))
         if credits and credits.available_count and credits.next_expiry is None:

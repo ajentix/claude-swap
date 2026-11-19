@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import sys
 from datetime import datetime
 
@@ -102,6 +103,14 @@ def provider_command(provider: str, argv: list[str], prog: str) -> int:
     switch.add_argument("--json", action="store_true")
     run = commands.add_parser("run", help="Launch the CLI in a temporary account profile")
     run.add_argument("account")
+    if provider == "codex":
+        auto = commands.add_parser("auto", help="Switch to another saved login before a limit")
+        auto.add_argument("--threshold", type=float, default=90, help="5-hour line, %% used (default 90)")
+        auto.add_argument("--weekly-threshold", type=float, help="weekly line (default: --threshold)")
+        auto.add_argument("--interval", type=float, default=60, help="seconds between checks (min 60)")
+        auto.add_argument("--once", action="store_true", help="one check; exit 0 switched, 1 error, 2 nothing, 3 blocked")
+        auto.add_argument("--dry-run", action="store_true")
+        auto.add_argument("--json", action="store_true")
     if "--" in argv:
         split = argv.index("--")
         tail, argv = argv[split + 1:], argv[:split]
@@ -110,6 +119,8 @@ def provider_command(provider: str, argv: list[str], prog: str) -> int:
     args = parser.parse_args(argv)
     if tail and args.command != "run":
         parser.error("Only run takes arguments after --")
+    if args.command == "auto":
+        return _codex_auto(args)
     store = SWITCHERS[provider](home())
     try:
         if args.command == "list":
@@ -138,3 +149,24 @@ def provider_command(provider: str, argv: list[str], prog: str) -> int:
             print(message, file=sys.stderr)
         return 1
     return 0
+
+
+def _codex_auto(args) -> int:
+    from .codex_auto import Decision, tick
+
+    while True:
+        try:
+            decision = tick(threshold=args.threshold, weekly_threshold=args.weekly_threshold, dry_run=args.dry_run)
+        except (ProviderError, LockError, OSError, ValueError) as exc:
+            message = str(exc) if isinstance(exc, ProviderError) else "Could not access the local login store"
+            decision = Decision("error", message)
+        if args.json:
+            print(json.dumps({"provider": "codex", "kind": decision.kind, "reason": decision.reason,
+                              "from": decision.source, "to": decision.target}), flush=True)
+        else:
+            stamp = time.strftime("%H:%M:%S")
+            arrow = f" -> {decision.target}" if decision.kind == "switch" else ""
+            print(f"{stamp}  {decision.kind}{arrow}: {decision.reason}", flush=True)
+        if args.once:
+            return decision.exit_code
+        time.sleep(max(60.0, args.interval))

@@ -95,6 +95,8 @@ Or let claude-swap auto-pick by remaining quota — `cswap switch --strategy bes
 
 ### Automatic switching
 
+Codex logins switch automatically with `cswap codex auto`, under the same rules: see [provider setup](docs/provider-quota.md#automatic-codex-switching).
+
 Let claude-swap watch your usage and switch for you. When the active account's 5-hour or 7-day window reaches the threshold (default 90%), it switches to the account with the most quota left — before you hit the limit, and safe to run while Claude Code is working:
 
 ```bash
