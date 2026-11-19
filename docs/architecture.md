@@ -117,7 +117,7 @@ Read next: the module docstring of `autoswitch.py`. The rules as users see them 
 ## Rules that hold everywhere
 
 - **Lock order.** cswap's lock, then Claude Code's credential lock, then its config lock. Never the other way round.
-- **No network under a lock.** A switch does only local I/O under its locks, and the usage store never holds its lock across a fetch. The single deliberate exception is the token refresh described above.
+- **No network under a store lock.** A switch does only local I/O under its locks, and the usage store releases its lock before a fetch. A dedicated login gate can span a token refresh. Codex takes its per-login gate before the account store lock so a refresh, activation, and scoped session of that login cannot consume or install the same token concurrently.
 - **A used refresh token's successor is never dropped.** Once the refresh is posted, the new credential is persisted or stashed, whatever else fails.
 - **A live credential enters a slot only when it is known to belong there.** Writing another account's credential into a slot destroys that slot's only refresh token.
 - **The usage store persists readings and fetch state only.** Labels such as "token expired" are derived on every pass and never written.

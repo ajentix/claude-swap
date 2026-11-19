@@ -34,16 +34,20 @@ Secrets stay with the commands: cswap only sees the usage they print.
 from __future__ import annotations
 
 import json
+import hashlib
+import math
 import os
 import subprocess
-import threading
 import time
 import tomllib
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
+from claude_swap.exceptions import LockError
 from claude_swap.fsutil import atomic_write_text, read_text_with_retry
+from claude_swap.locking import FileLock
 from claude_swap.paths import get_backup_root
 
 CONFIG_NAME = "external.toml"
@@ -116,7 +120,8 @@ def load_sources(path: Path | None = None) -> list[Source]:
     except (OSError, ValueError):
         raw = {}
     sources = {s.name: s for s in BUILTIN}
-    for entry in raw.get("source", []):
+    entries = raw.get("source")
+    for entry in entries if isinstance(entries, list) else ():
         if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
             continue
         name = entry["name"]
@@ -135,8 +140,8 @@ def load_sources(path: Path | None = None) -> list[Source]:
             title=str(entry.get("title") or base.title or name),
             label=str(entry.get("label", base.label) or ""),
             merge=bool(entry.get("merge", base.merge)),
-            every=float(entry.get("every", base.every)),
-            timeout=float(entry.get("timeout", base.timeout)),
+            every=_positive(entry.get("every"), base.every),
+            timeout=_positive(entry.get("timeout"), base.timeout),
         )
     return list(sources.values())
 
@@ -152,9 +157,22 @@ def _run(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
     )
 
 
-def _last_line(proc: subprocess.CompletedProcess) -> str:
-    lines = (proc.stderr or proc.stdout or "").strip().splitlines()
-    return lines[-1][:160] if lines else f"exit {proc.returncode}"
+def _positive(value: object, default: float) -> float:
+    try:
+        if type(value) in (int, float) and math.isfinite(value) and value > 0:
+            return float(value)
+    except OverflowError:
+        pass
+    return default
+
+
+def _percent(value: object) -> float | None:
+    try:
+        if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 100:
+            return float(value)
+    except OverflowError:
+        pass
+    return None
 
 
 def _parse(source: Source, rows: list, fetched_at: float | None) -> list[ExternalAccount]:
@@ -163,15 +181,16 @@ def _parse(source: Source, rows: list, fetched_at: float | None) -> list[Externa
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("account"), str):
             continue
+        raw_windows = row.get("windows")
         windows = tuple(
             ExternalWindow(
                 name=str(w.get("name", "")),
-                used_pct=float(w["used_pct"]) if isinstance(w.get("used_pct"), (int, float)) else None,
+                used_pct=_percent(w.get("used_pct")),
                 resets_at=_iso(w.get("resets_at")),
                 note=str(w.get("note") or ""),
                 resets=str(w["resets"]) if w.get("resets") else None,
             )
-            for w in row.get("windows") or [] if isinstance(w, dict)
+            for w in (raw_windows if isinstance(raw_windows, list) else ()) if isinstance(w, dict)
         )
         accounts.append(ExternalAccount(
             source=source.name,
@@ -181,7 +200,8 @@ def _parse(source: Source, rows: list, fetched_at: float | None) -> list[Externa
             note=str(row.get("note") or ""),
             error=str(row.get("error") or ""),
             windows=windows,
-            switchable=(bool(source.switch_cmd) or bool(row.get("switchable"))) and row["account"] != "-",
+            switchable=(bool(source.switch_cmd) or (bool(source.providers) and row.get("switchable") is True))
+            and row["account"] != "-",
             product=str(row.get("product") or ""),
             fetched_at=fetched_at,
         ))
@@ -192,9 +212,6 @@ def _parse(source: Source, rows: list, fetched_at: float | None) -> list[Externa
 # Like the Claude usage store: screens paint from it at once, a run happens only
 # when the entry is older than the source's interval, an in-flight claim keeps two
 # processes from running the same command, and a failed run keeps the last rows.
-
-_store_lock = threading.Lock()
-
 
 def store_path() -> Path:
     return get_backup_root() / STORE_NAME
@@ -208,28 +225,86 @@ def _read_store() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _update_store(name: str, **fields) -> None:
-    with _store_lock:
-        data = _read_store()
-        entry = data.get(name) if isinstance(data.get(name), dict) else {}
-        entry.update(fields)
-        data[name] = entry
-        atomic_write_text(store_path(), json.dumps(data, ensure_ascii=False))
+def _store_lock() -> FileLock:
+    return FileLock(store_path().with_suffix(".lock"))
+
+
+def _entry(data: dict, name: str) -> dict:
+    item = data.get(name)
+    return item if isinstance(item, dict) else {}
+
+
+def _source_entry(data: dict, source: Source) -> dict:
+    entry = _entry(data, source.name)
+    return entry if entry.get("source_key") == _source_key(source) else {}
+
+
+def _source_key(source: Source) -> str | None:
+    if source.providers:
+        return None
+    return hashlib.sha256(json.dumps((source.list_cmd, source.switch_cmd)).encode()).hexdigest()
+
+
+def _write_store(data: dict, name: str, entry: dict) -> None:
+    data[name] = entry
+    atomic_write_text(store_path(), json.dumps(data, ensure_ascii=False))
 
 
 def stored(source: Source) -> list[ExternalAccount]:
     """The last good rows, without running anything (empty when never fetched)."""
-    entry = _read_store().get(source.name) or {}
+    entry = _source_entry(_read_store(), source)
     rows = entry.get("rows")
-    return _parse(source, rows, entry.get("at")) if isinstance(rows, list) else []
+    accounts = _parse(source, rows, _positive(entry.get("at"), 0) or None) if isinstance(rows, list) else []
+    error = entry.get("error")
+    if isinstance(error, str) and error:
+        return [replace(accounts[0], error=error), *accounts[1:]] if accounts else [
+            ExternalAccount(source.name, "-", error=error),
+        ]
+    return accounts
 
 
 def due(source: Source, now: float | None = None) -> bool:
-    entry = _read_store().get(source.name) or {}
     now = time.time() if now is None else now
-    fresh = now - float(entry.get("at") or 0) < source.every
-    claimed = now - float(entry.get("claimed_at") or 0) < source.timeout
-    return not fresh and not claimed
+    entry = _source_entry(_read_store(), source)
+    return not any(_recent(entry, field, source.every, now) for field in ("attempted_at", "at")) and not _claimed(entry, source, now)
+
+
+def _recent(entry: dict, field: str, seconds: float, now: float) -> bool:
+    stamp = _positive(entry.get(field), 0)
+    return bool(stamp and 0 <= now - stamp < seconds)
+
+
+def _claimed(entry: dict, source: Source, now: float) -> bool:
+    return _recent(entry, "claimed_at", source.timeout + 5, now)
+
+
+def _claim(source: Source, force: bool) -> str | None:
+    with _store_lock():
+        data = _read_store()
+        entry = _source_entry(data, source)
+        now = time.time()
+        if _claimed(entry, source, now):
+            return None
+        if not force and (_recent(entry, "attempted_at", source.every, now)
+                          or _recent(entry, "at", source.every, now)):
+            return None
+        claim = uuid4().hex
+        _write_store(data, source.name, {**entry, "claim": claim, "claimed_at": now,
+                                        "source_key": _source_key(source)})
+        return claim
+
+
+def _finish(source: Source, claim: str, rows: list, error: str) -> None:
+    with _store_lock():
+        data = _read_store()
+        entry = _source_entry(data, source)
+        if entry.get("claim") != claim:
+            return
+        now = time.time()
+        if not error:
+            entry.update(at=now, rows=rows)
+        entry.update(attempted_at=now, claimed_at=0, claim=None, error=error)
+        _write_store(data, source.name, entry)
 
 
 def fetch(source: Source, *, force: bool = False) -> list[ExternalAccount]:
@@ -238,49 +313,52 @@ def fetch(source: Source, *, force: bool = False) -> list[ExternalAccount]:
     A failed run keeps the last good rows (with the error on the first) or, with
     none stored, becomes one error row.
     """
-    if not force and not due(source):
+    try:
+        claim = _claim(source, force)
+    except (OSError, LockError):
+        return [ExternalAccount(source.name, "-", error="Could not access the Watch cache")]
+    if claim is None:
         return stored(source)
-    _update_store(source.name, claimed_at=time.time())
     error = ""
+    rows = []
     try:
         if source.providers:
             rows = _builtin_rows(source, force)  # empty: nothing configured, the source hides
         else:
             proc = _run(list(source.list_cmd), source.timeout)
             if proc.returncode != 0:
-                error = _last_line(proc)
+                error = f"list command exited with status {proc.returncode}"
             else:
                 rows = json.loads(proc.stdout)
                 if not isinstance(rows, list) or not _parse(source, rows, None):
                     error = "list output has no accounts"
-    except (OSError, subprocess.SubprocessError) as exc:
-        error = f"{type(exc).__name__}: {exc}"[:160]
+    except subprocess.TimeoutExpired:
+        error = "list command timed out"
+    except (OSError, subprocess.SubprocessError):
+        error = "Could not run the list command"
     except ValueError:
         error = "list output is not JSON"
     except Exception as exc:  # a built-in provider failing must not take the screen down
         error = f"{source.name} lookup failed: {type(exc).__name__}"
-    if not error:
-        now = time.time()
-        _update_store(source.name, at=now, rows=rows, claimed_at=0)
-        return _parse(source, rows, now)
-    _update_store(source.name, claimed_at=0)
-    last = stored(source)
-    if not last:
-        return [ExternalAccount(source.name, "-", error=error)]
-    return [replace(last[0], error=error), *last[1:]]
+    try:
+        _finish(source, claim, rows, error)
+    except (OSError, LockError):
+        return [ExternalAccount(source.name, "-", error="Could not save the Watch cache")]
+    return stored(source)
 
 
 def mark_active(source: Source, account: str) -> None:
     """After a switch, move the stored active flag so every screen shows it now."""
-    with _store_lock:
+    with _store_lock():
         data = _read_store()
-        entry = data.get(source.name)
-        if not isinstance(entry, dict) or not isinstance(entry.get("rows"), list):
+        entry = _source_entry(data, source)
+        if not entry:
             return
-        for row in entry["rows"]:
+        for row in entry.get("rows", []):
             if isinstance(row, dict):
                 row["active"] = row.get("account") == account
-        atomic_write_text(store_path(), json.dumps(data, ensure_ascii=False))
+        entry.update(claim=None, claimed_at=0)
+        _write_store(data, source.name, entry)
 
 
 def switch(source: Source, account: str) -> tuple[bool, str]:
@@ -292,12 +370,13 @@ def switch(source: Source, account: str) -> tuple[bool, str]:
     cmd = [part.replace("{account}", account) for part in source.switch_cmd]
     try:
         proc = _run(cmd, source.timeout)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"{type(exc).__name__}: {exc}"[:160]
-    lines = (proc.stdout or "").strip().splitlines()
+    except subprocess.TimeoutExpired:
+        return False, "Switch command timed out"
+    except (OSError, subprocess.SubprocessError):
+        return False, "Could not run the switch command"
     if proc.returncode != 0:
-        return False, _last_line(proc)
-    return True, lines[-1][:160] if lines else f"switched {source.name} to {account}"
+        return False, f"switch command exited with status {proc.returncode}"
+    return True, f"switched {source.name} to {account}"
 
 
 # -- built-in providers --------------------------------------------------------------
@@ -403,7 +482,8 @@ def plan_overrides() -> dict[str, dict[str, str]]:
 
 
 def set_plan(source: str, account: str, name: str | None) -> None:
-    with _store_lock:
+    path = _plans_path()
+    with FileLock(path.with_suffix(".lock")):
         data = plan_overrides()
         accounts = data.setdefault(source, {})
         if name and name.strip():
@@ -411,11 +491,12 @@ def set_plan(source: str, account: str, name: str | None) -> None:
         else:
             accounts.pop(account, None)
         data = {s: a for s, a in data.items() if a}
-        atomic_write_text(_plans_path(), json.dumps(data, ensure_ascii=False, indent=1))
+        atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=1))
 
 
 def plan_command(argv: list[str], prog: str) -> int:
     import argparse
+    import sys
 
     parser = argparse.ArgumentParser(
         prog=f"{prog} plan",
@@ -439,7 +520,11 @@ def plan_command(argv: list[str], prog: str) -> int:
     known = {s.name for s in load_sources()}
     if args.source not in known:
         parser.error(f"unknown source {args.source!r}; sources: {', '.join(sorted(known))}")
-    set_plan(args.source, args.account, None if args.unset else args.name)
+    try:
+        set_plan(args.source, args.account, None if args.unset else args.name)
+    except (OSError, LockError):
+        print("Could not save the plan name", file=sys.stderr)
+        return 1
     shown = "removed" if args.unset else f"set to {args.name.strip()}"
     print(f"{args.source} {args.account}: plan {shown}")
     return 0

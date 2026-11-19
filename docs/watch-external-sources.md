@@ -85,6 +85,6 @@ The list command prints a JSON array, one object per account:
 ## What to expect
 
 - **Fast to open.** The last rows of every source are kept in `external_store.json` in the backup root. The watch screen paints them at once, with their age, and reads a source again only when its rows are older than `every` (Antigravity 5 minutes, since each reading starts the Antigravity CLI once per account; the others 2 minutes). Several `cswap watch` windows share one reading.
-- **Failures keep the last rows.** A reading that fails leaves the previous rows on screen with the error added.
+- **Failures keep the last rows.** A failed reading displays the error alongside the previous rows. The next automatic attempt follows the source interval. Editing a custom source's commands starts a new set of readings.
 - **Switching.** Enter on an account switches it. On a merged card (`merge = true`) Enter asks which to switch: Claude Code, the other product, or all. After a switch the active marker moves at once; usage is not re-read. Antigravity applies a switch to new `agy` sessions; restart a running one. Codex can also switch on its own: `cswap codex auto`.
 - **Your secrets stay where they are.** Built-in providers read the stores described in [provider setup](provider-quota.md); your own commands keep their keys to themselves, cswap only reads what they print.

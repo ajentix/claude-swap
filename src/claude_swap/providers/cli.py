@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 import sys
 from datetime import datetime
@@ -120,6 +121,11 @@ def provider_command(provider: str, argv: list[str], prog: str) -> int:
     if tail and args.command != "run":
         parser.error("Only run takes arguments after --")
     if args.command == "auto":
+        for threshold in (args.threshold, args.weekly_threshold):
+            if threshold is not None and (not math.isfinite(threshold) or not 0 <= threshold <= 100):
+                parser.error("Thresholds must be between 0 and 100 percent")
+        if not math.isfinite(args.interval) or args.interval <= 0:
+            parser.error("Interval must be a finite positive number")
         return _codex_auto(args)
     store = SWITCHERS[provider](home())
     try:

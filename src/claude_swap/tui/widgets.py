@@ -584,11 +584,13 @@ class AccountItem(ListItem):
         super().__init__(AccountCard(acc))
         self.number = acc.number
         self.email = acc.email
+        self.org_uuid = acc.org_uuid
         self.extras: list = []
 
     def set_account(self, acc: AccountSnapshot) -> None:
         self.number = acc.number
         self.email = acc.email
+        self.org_uuid = acc.org_uuid
         self.query_one(AccountCard).set_account(acc)
 
     def set_extras(self, extras: list) -> None:

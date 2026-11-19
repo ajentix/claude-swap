@@ -11,12 +11,16 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
+from claude_swap.exceptions import LockError
+from claude_swap.locking import FileLock
+
 from .accounts import Account, LocalAccounts, Login
-from .api import get_usage
+from .api import NoRedirect, get_usage
 from .common import (
     ProviderAccountQuota, ProviderError, child_environment, display_text, email_label,
     home, jwt_claims, object_dict, objects, read_json, window, write_json,
 )
+from .codex_auto import LEGACY_STATE_NAME, STATE_NAME
 from .reset_credits import CODEX_CREDITS_URL, codex_reset_inventory
 
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
@@ -65,13 +69,9 @@ class CodexAccounts(LocalAccounts):
             id_claims = jwt_claims(tokens.get("id_token"))
             access_claims = jwt_claims(access)
             profile = object_dict(access_claims.get("https://api.openai.com/profile"))
-            auth = object_dict(access_claims.get("https://api.openai.com/auth"))
             email = email_label(id_claims.get("email")) or email_label(profile.get("email"))
-            account_id = tokens.get("account_id") or auth.get("chatgpt_account_id")
-            principal = id_claims.get("sub") or auth.get("chatgpt_user_id") or email or access_claims.get("sub")
-            if isinstance(account_id, str) and account_id and isinstance(principal, str) and principal:
-                identity = f"{account_id}:{principal}"
-            else:
+            identity = _stable_identity(tokens)
+            if identity is None:
                 fingerprint = tokens.get("refresh_token") or access
                 identity = fingerprint if isinstance(fingerprint, str) else access
             digest = hashlib.sha256(identity.encode()).hexdigest()
@@ -89,13 +89,46 @@ class CodexAccounts(LocalAccounts):
     def write_active(self, login: Login) -> None:
         write_json(self.active_path, login.data)
 
+    def stash_paths(self) -> list[Path]:
+        paths = []
+        for path in super().stash_paths():
+            if path.name.casefold() == STATE_NAME:
+                continue
+            if path.name.casefold() == LEGACY_STATE_NAME:
+                try:
+                    data = read_json(path)
+                except (OSError, ValueError):
+                    pass  # Let the roster report an unreadable file.
+                else:
+                    if data and set(data) == {"switched_at"}:
+                        continue
+            paths.append(path)
+        return paths
+
     def environment(self, profile: Path) -> dict[str, str]:
         env = child_environment()
         env.update(CODEX_HOME=str(profile), HOME=str(Path.home()), USERPROFILE=str(Path.home()))
         return env
 
     def run(self, identifier: str, args: list[str]) -> int:
-        return super().run(identifier, ["-c", 'cli_auth_credentials_store="file"', *args])
+        account, _ = self._resolve(identifier)
+        with self._login_gate(account):
+            selected, _ = self._resolve(account.label)
+            if selected.login.identity != account.login.identity:
+                raise ProviderError("The selected login changed. List accounts and try again")
+            return self._run_account(selected, ["-c", 'cli_auth_credentials_store="file"', *args])
+
+    def _login_gate(self, account: Account) -> FileLock:
+        return FileLock(self.directory / f".login-{account.login.identity}.lock")
+
+    def switch(self, identifier: str, *, expected_identity: str | None = None,
+               expected_active: str | None = None) -> str:
+        account, _ = self._resolve(identifier)
+        if expected_identity is not None and expected_identity != account.login.identity:
+            raise ProviderError("The selected login changed. List accounts and try again")
+        with self._login_gate(account):
+            return super().switch(account.label, expected_identity=account.login.identity,
+                                  expected_active=expected_active)
 
 
 def parse_codex(data: dict, secrets: tuple[str, ...]) -> tuple:
@@ -106,6 +139,8 @@ def parse_codex(data: dict, secrets: tuple[str, ...]) -> tuple:
             limits.append((f"{name} ", object_dict(item.get("rate_limit"))))
     windows = []
     for prefix, limit in limits:
+        blocked = limit.get("allowed") is False or limit.get("limit_reached") is True
+        start = len(windows)
         for key, default in (("primary_window", "5h"), ("secondary_window", "7d")):
             entry = object_dict(limit.get(key))
             if not entry:
@@ -114,7 +149,10 @@ def parse_codex(data: dict, secrets: tuple[str, ...]) -> tuple:
             reset = entry.get("reset_at", entry.get("resets_at"))
             if reset is None and type(entry.get("reset_after_seconds")) in (float, int):
                 reset = time.time() + entry["reset_after_seconds"]
-            windows.append(window(prefix + label, entry.get("used_percent"), reset, offset=100, scale=-1))
+            windows.append(window(prefix + label, entry.get("used_percent"), reset,
+                                  offset=100, scale=-1, disabled=blocked))
+        if blocked and not prefix and len(windows) == start:
+            windows.append(window("Codex", None, disabled=True))
     # Team/Enterprise: a monthly credit pool instead of (or beside) the windows.
     spend = object_dict(object_dict(data.get("spend_control")).get("individual_limit")) \
         or object_dict(data.get("individual_limit"))
@@ -157,22 +195,22 @@ def _post_refresh(refresh_token: str) -> dict:
     request = Request(REFRESH_URL, data=body, headers={
         "Content-Type": "application/json", "Accept": "application/json", "User-Agent": "claude-swap"})
     try:
-        with build_opener(ProxyHandler({})).open(request, timeout=45) as response:
+        with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=45) as response:
             data = json.loads(response.read(1_048_576))
     except HTTPError as exc:
         with exc:
             try:
-                err = json.loads(exc.read(4096))
+                err = object_dict(json.loads(exc.read(4096)))
             except (OSError, ValueError):
                 err = {}
         detail = object_dict(err.get("error")) if isinstance(err.get("error"), dict) else err
         code = detail.get("code") or err.get("error")
-        if exc.code == 401 or code in RELOGIN_CODES:
+        if exc.code == 401 or (isinstance(code, str) and code in RELOGIN_CODES):
             raise ProviderError(RELOGIN) from None
         raise ProviderError(f"Codex token refresh failed (HTTP {exc.code})") from None
     except (URLError, OSError, ValueError):
         raise ProviderError("Codex token refresh unavailable") from None
-    if not isinstance(data, dict) or not isinstance(data.get("access_token"), str):
+    if not isinstance(data, dict) or not isinstance(data.get("access_token"), str) or not data["access_token"]:
         raise ProviderError("Codex token refresh returned no token")
     return data
 
@@ -186,14 +224,30 @@ def refresh_saved(account: Account, store: "CodexAccounts") -> Account:
     """
     if account.active or account.path is None:
         return account
+    with store._login_gate(account):
+        accounts, error = store.roster()
+        current = next((row for row in accounts if row.login.identity == account.login.identity
+                        and row.path == account.path), None)
+        if current is None:
+            raise ProviderError("The saved Codex login changed. List accounts and try again")
+        if error and store._current()[1]:
+            raise ProviderError("Cannot verify the active Codex login before refresh")
+        if current.active or current.login != account.login:
+            return current
+        return _rotate_saved(current, store)
+
+
+def _rotate_saved(account: Account, store: CodexAccounts) -> Account:
     tokens = object_dict(account.login.data.get("tokens"))
+    if not _stable_identity(tokens):
+        raise ProviderError("Cannot verify this saved Codex login for refresh. Sign in again")
     refresh_token = tokens.get("refresh_token")
     if not isinstance(refresh_token, str) or not refresh_token:
         raise ProviderError(RELOGIN)
     fresh = _post_refresh(refresh_token)
     with store._lock():
         current = read_json(account.path) or {}
-        if object_dict(current.get("tokens")).get("refresh_token") != refresh_token:
+        if current != account.login.data:
             raise ProviderError("The saved Codex login changed during refresh. Try again")
         merged = {**object_dict(current.get("tokens"))}
         for key in ("id_token", "access_token", "refresh_token"):
@@ -201,24 +255,46 @@ def refresh_saved(account: Account, store: "CodexAccounts") -> Account:
                 merged[key] = fresh[key]
         current["tokens"] = merged
         current["last_refresh"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        login = store.parse(current)
+        if login.identity != account.login.identity:
+            raise ProviderError("Codex token refresh returned another account. Sign in again")
         write_json(account.path, current)
-    return replace(account, login=store.parse(current))
+    return replace(account, login=login)
 
 
-def codex_quota(account: Account, store: "CodexAccounts | None" = None) -> ProviderAccountQuota:
+def _stable_identity(tokens: dict) -> str | None:
+    id_claims = jwt_claims(tokens.get("id_token"))
+    access_claims = jwt_claims(tokens.get("access_token"))
+    profile = object_dict(access_claims.get("https://api.openai.com/profile"))
+    auth = object_dict(access_claims.get("https://api.openai.com/auth"))
+    account_id = tokens.get("account_id") or auth.get("chatgpt_account_id")
+    principal = (id_claims.get("sub") or auth.get("chatgpt_user_id")
+                 or email_label(id_claims.get("email")) or email_label(profile.get("email"))
+                 or access_claims.get("sub"))
+    if isinstance(account_id, str) and account_id and isinstance(principal, str) and principal:
+        return f"{account_id}:{principal}"
+    return None
+
+
+def codex_quota(account: Account, store: "CodexAccounts | None" = None, *,
+                refresh_login: bool = True) -> ProviderAccountQuota:
     row = ProviderAccountQuota("codex", account.label, account.number, account.active, True)
     store = store or CodexAccounts(home())
     try:
-        if not account.active and account.path is not None and _refresh_due(account.login.data, time.time()):
+        if (refresh_login and not account.active and account.path is not None
+                and object_dict(account.login.data.get("tokens"))
+                and _refresh_due(account.login.data, time.time())):
             account = refresh_saved(account, store)
         _, headers = codex_oauth(account)
+    except LockError:
+        return replace(row, status="unavailable", error="Saved Codex login is busy")
     except ProviderError as exc:
         return replace(row, status="unavailable", error=str(exc))
     try:
         try:
             raw = get_usage(USAGE_URL, headers)
         except ProviderError as exc:
-            if not str(exc).startswith("HTTP 401") or account.active or account.path is None:
+            if not refresh_login or not str(exc).startswith("HTTP 401") or account.active or account.path is None:
                 raise
             account = refresh_saved(account, store)  # one retry with a fresh token
             _, headers = codex_oauth(account)
@@ -231,8 +307,10 @@ def codex_quota(account: Account, store: "CodexAccounts | None" = None) -> Provi
                 credits = details or credits
             except ProviderError:
                 pass  # The primary usage read still has the reported credit count.
-        if credits is None and not any(item.remaining_pct is not None for item in windows):
+        if credits is None and not any(item.remaining_pct is not None or item.disabled for item in windows):
             raise ProviderError("Codex returned no quota windows")
         return replace(row, windows=windows, plan=plan, reset_credits=credits)
+    except LockError:
+        return replace(row, status="unavailable", error="Saved Codex login is busy")
     except ProviderError as exc:
         return replace(row, status="error", error=str(exc))

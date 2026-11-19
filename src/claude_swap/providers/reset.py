@@ -16,7 +16,7 @@ from claude_swap.switcher import ClaudeAccountSwitcher
 
 from .api import get_usage, post_reset
 from .claude import claude_headers
-from .codex import USAGE_URL, CodexAccounts, codex_oauth
+from .codex import CREDIT_HEADERS, USAGE_URL, CodexAccounts, codex_oauth
 from .common import KST, ProviderError, display_text, home, object_dict, read_json, reset_clock, write_json
 from .quota import invalidate_quota
 from .reset_credits import CLAUDE_USAGE_URL, CODEX_CREDITS_URL, ResetOffer, claude_reset_inventory, codex_reset_inventory
@@ -115,7 +115,7 @@ def _offer(target: ResetTarget) -> ResetOffer:
     if target.provider == "claude":
         credits, offer = claude_reset_inventory(get_usage(CLAUDE_USAGE_URL, target.headers))
     else:
-        credits, offer = codex_reset_inventory(get_usage(CODEX_CREDITS_URL, target.headers))
+        credits, offer = codex_reset_inventory(get_usage(CODEX_CREDITS_URL, {**target.headers, **CREDIT_HEADERS}))
     if credits is None:
         raise ProviderError("Reset credit availability was not reported by the provider")
     if not offer:
@@ -192,7 +192,7 @@ def _reserve(path: Path, target: ResetTarget, intent: ResetIntent) -> dict:
 def _send(target: ResetTarget, entry: dict) -> str:
     try:
         if target.provider == "codex":
-            data = post_reset(CODEX_CREDITS_URL + "/consume", target.headers, {
+            data = post_reset(CODEX_CREDITS_URL + "/consume", {**target.headers, **CREDIT_HEADERS}, {
                 "redeem_request_id": entry["request_id"], "credit_id": entry["credit_id"],
             })
             outcome = data.get("code")

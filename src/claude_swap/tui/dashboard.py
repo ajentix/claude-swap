@@ -27,6 +27,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, ListView, Static
 
 from claude_swap import external
+from claude_swap.exceptions import LockError
 from claude_swap.models import AccountsSnapshot
 from claude_swap.tui.modals import ChoiceModal
 from claude_swap.tui.widgets import (
@@ -422,9 +423,33 @@ class WatchScreen(AccountListScreen):
     def _active_index(self, snap: AccountsSnapshot) -> int:
         return super()._active_index(snap) + self._claude_offset()
 
-    async def _sync_external(self) -> None:
+    def _selection_key(self, listview: ListView) -> tuple | None:
+        item = listview.highlighted_child
+        if isinstance(item, AccountItem):
+            return ("claude", item.number, item.email, item.org_uuid)
+        if isinstance(item, ExternalItem):
+            return ("external", *item.key)
+        return None
+
+    def _restore_selection(self, listview: ListView, selected: tuple | None) -> None:
+        if not self._selecting or selected is None:
+            return
+        for i, item in enumerate(listview.children):
+            if isinstance(item, AccountItem):
+                key = ("claude", item.number, item.email, item.org_uuid)
+            elif isinstance(item, ExternalItem):
+                key = ("external", *item.key)
+            else:
+                continue
+            if key == selected:
+                listview.index = i
+                return
+        self._set_selecting(False)
+
+    async def _sync_external(self, selected: tuple | None = None) -> None:
         async with self._list_lock:
             listview = self.query_one("#accounts", ListView)
+            selected = selected or self._selection_key(listview)
             # A merge source's account with a Claude account's email goes on that
             # card; the rest get their own section after the Claude accounts.
             emails = {i.email for i in listview.query(AccountItem)}
@@ -462,12 +487,12 @@ class WatchScreen(AccountListScreen):
                     if isinstance(item, ExternalItem):
                         item.set_account(w)
                         item.set_grid(label_w)
+                self._restore_selection(listview, selected)
                 return
-            index = listview.index
             for item in items:
                 await item.remove()
             rows = []
-            for n, w in enumerate(wanted):
+            for w in wanted:
                 if isinstance(w, tuple):
                     rows.append(ExternalHeader(w[1], w[2]))
                     continue
@@ -476,25 +501,25 @@ class WatchScreen(AccountListScreen):
             for row in rows:
                 if isinstance(row, ExternalItem):
                     row.set_grid(label_w)
-            if self._selecting and index is not None:
-                listview.index = min(index, len(listview.children) - 1)
+            self._restore_selection(listview, selected)
 
     async def _on_snapshot(self, snap: AccountsSnapshot | None) -> None:
         async with self._list_lock:
+            selected = self._selection_key(self.query_one("#accounts", ListView))
             await super()._on_snapshot(snap)
-        await self._sync_external()  # a Claude rebuild clears the whole list
+        await self._sync_external(selected)
 
     def _choose_switch(self, number: str, email: str, extras: list) -> None:
         """One email on Claude and another source: ask which to switch."""
         choices = [("claude", "Claude Code")]
-        choices += [(acc.source, prefix or acc.source) for prefix, acc in extras]
+        choices += [(f"external-{i}", prefix or acc.source) for i, (prefix, acc) in enumerate(extras)]
         choices.append(("all", "Both" if len(extras) == 1 else "All"))
 
         def chosen(choice: str | None) -> None:
             if choice in ("claude", "all"):
                 self.app.do_switch(number)
-            for _prefix, acc in extras:
-                if choice in (acc.source, "all"):
+            for i, (_prefix, acc) in enumerate(extras):
+                if choice in (f"external-{i}", "all"):
                     self._switch_external(acc)
 
         self.app.push_screen(ChoiceModal(f"Switch {email} on:", choices, title="Switch"), chosen)
@@ -511,7 +536,10 @@ class WatchScreen(AccountListScreen):
     def _switch_external_blocking(self, source: external.Source, account: str) -> None:
         ok, message = external.switch(source, account)
         if ok:
-            external.mark_active(source, account)  # usage is unchanged; only the marker moves
+            try:
+                external.mark_active(source, account)
+            except (OSError, LockError):
+                message += ". Watch cache could not be updated"
         self.app.call_from_thread(self._external_switched, source, ok, message)
 
     def _external_switched(self, source: external.Source, ok: bool, message: str) -> None:

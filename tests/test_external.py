@@ -142,18 +142,29 @@ class TestStore:
 
     def test_claimed_entry_is_not_run_again(self, root):
         src = source(root)
-        external._update_store(src.name, claimed_at=time.time())
+        assert external._claim(src, False)
         assert external.fetch(src) == []
+        assert external.fetch(src, force=True) == []
         assert runs(root) == 0
 
     def test_failed_run_keeps_last_rows_with_the_error(self, root):
         src = source(root)
         external.fetch(src)
-        broken = external.Source(name=src.name, list_cmd=tuple(py("import sys; sys.exit('boom')")),
-                                 every=src.every, timeout=30)
-        rows = external.fetch(broken, force=True)
+        from unittest.mock import patch
+        from subprocess import CompletedProcess
+
+        with patch.object(external, "_run", return_value=CompletedProcess([], 1, "", "private-value")):
+            rows = external.fetch(src, force=True)
         assert [a.account for a in rows] == ["a@example.com", "b@example.com"]
-        assert rows[0].error == "boom"
+        assert rows[0].error == "list command exited with status 1"
+        assert external.fetch(src) == rows and not external.due(src)
+
+    def test_replacing_command_discards_the_old_selection(self, root):
+        from dataclasses import replace
+
+        src = source(root)
+        assert external.fetch(src)
+        assert not external.stored(replace(src, switch_cmd=("new", "{account}")))
 
     def test_failed_first_run_is_one_error_row(self, root):
         broken = external.Source(name="x", list_cmd=tuple(py("print('not json')")), timeout=30)
@@ -163,14 +174,31 @@ class TestStore:
     def test_mark_active_moves_the_marker(self, root):
         src = source(root)
         external.fetch(src)
+        claim = external._claim(src, True)
         external.mark_active(src, "b@example.com")
+        external._finish(src, claim, ROWS, "")
         assert [a.active for a in external.stored(src)] == [False, True]
 
 
 class TestSwitch:
     def test_substitutes_the_account(self, root):
-        ok, message = external.switch(source(root), "b@example.com")
-        assert ok and message == "switched to b@example.com"
+        from unittest.mock import patch
+        from subprocess import CompletedProcess
+
+        src = source(root)
+        with patch.object(external, "_run", return_value=CompletedProcess([], 0, "private-value", "")) as run:
+            ok, message = external.switch(src, "b@example.com")
+        assert run.call_args.args[0][-1] == "b@example.com"
+        assert ok and message == "switched agy to b@example.com"
+
+    def test_malformed_windows_do_not_break_rendering(self, root):
+        src = external.Source("mine")
+        row, = external._parse(src, [{"account": "a", "switchable": True, "windows": [
+            {"used_pct": float("nan")}, {"used_pct": 200}, {"used_pct": True},
+        ]}], None)
+        assert not row.switchable
+        assert [w.used_pct for w in row.windows] == [None, None, None]
+        assert external._parse(src, [{"account": "a", "windows": 123}], None)[0].windows == ()
 
     def test_view_only_source(self, root):
         src = source(root, switch=False)

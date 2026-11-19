@@ -6,6 +6,8 @@ import base64
 import io
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError
 
@@ -48,6 +50,27 @@ class TestDue:
 
 
 class TestRefreshSaved:
+    def test_concurrent_readers_never_consume_the_same_refresh_token(self, saved, monkeypatch):
+        store, account, path = saved
+        entered, release = Event(), Event()
+        calls = []
+
+        def post(token):
+            calls.append(token)
+            entered.set()
+            assert release.wait(5)
+            return {"access_token": jwt(exp=time.time() + 9e5), "refresh_token": "rt-2"}
+
+        monkeypatch.setattr(codex, "_post_refresh", post)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(codex.refresh_saved, account, store)
+            assert entered.wait(5)
+            second = pool.submit(codex.refresh_saved, account, store)
+            release.set()
+            assert first.result(timeout=5).login == second.result(timeout=5).login
+        assert calls == ["rt-1"]
+        assert read_json(path)["tokens"]["refresh_token"] == "rt-2"
+
     def test_writes_rotated_tokens_and_keeps_missing_ones(self, saved, monkeypatch):
         store, account, path = saved
         monkeypatch.setattr(codex, "_post_refresh", lambda rt: {"access_token": jwt(exp=time.time() + 9e5),

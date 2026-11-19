@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,7 +34,17 @@ class TestDecide:
     def test_margin_stops_ping_pong(self):
         d = codex_auto.decide([row("a", 91, 0, active=True), row("b", 89, 0)])
         assert d.kind == "blocked"  # b is under the line by 1 point and has barely more left (11% vs 9%)
-        assert codex_auto.decide([row("a", 91, 0, active=True), row("b", 85, 0)]).target == "b"  # 15% vs 9%
+        assert codex_auto.decide([row("a", 91, 0, active=True), row("b", 85, 0)]).kind == "blocked"
+        assert codex_auto.decide([row("a", 91, 0, active=True), row("b", 80, 0)]).target == "b"
+
+    def test_nan_is_rejected_and_scoped_windows_are_not_switch_lines(self):
+        from dataclasses import replace
+
+        active = row("a", 20, 0, active=True)
+        candidate = row("b", 0, 0)
+        assert codex_auto.decide([active, candidate], float("nan")).kind == "error"
+        active = replace(active, windows=active.windows + (QuotaWindow("Spark 7d", 0, disabled=True),))
+        assert codex_auto.decide([active, candidate]).kind == "no-switch"
 
     def test_all_over_moves_only_for_meaningfully_more_left(self):
         assert codex_auto.decide([row("a", 99, 0, active=True), row("b", 95, 0)]).target == "b"  # 5% vs 1%
@@ -63,13 +74,21 @@ class TestTick:
             def __init__(self, _root):
                 pass
 
-            def switch(self, identifier):
+            def roster(self):
+                return [SimpleNamespace(label=r.account, active=r.active, login=SimpleNamespace(identity=r.account))
+                        for r in rows], None
+
+            def switch(self, identifier, *, expected_identity, expected_active):
+                assert expected_identity == "b" and expected_active == "a"
                 switched.append(identifier)
                 return identifier
 
         monkeypatch.setattr(quota, "collect_quota", lambda providers, refresh=False, root=None: rows)
         monkeypatch.setattr(quota, "invalidate_quota", lambda provider, root=None: None)
         monkeypatch.setattr(codex, "CodexAccounts", Store)
+        monkeypatch.setattr(codex, "codex_quota",
+                            lambda account, _, refresh_login: next(r for r in rows if r.account == account.label)
+                            if not refresh_login else pytest.fail("dry-run refreshed a login"))
         return tmp_path, switched
 
     def test_switches_then_cools_down(self, env):

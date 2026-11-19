@@ -135,10 +135,15 @@ class LocalAccounts:
                 raise ProviderError("No local login found. Sign in with the provider CLI first")
             return self._save(active, self.roster()[0], label)
 
-    def switch(self, identifier: str) -> str:
+    def switch(self, identifier: str, *, expected_identity: str | None = None,
+               expected_active: str | None = None) -> str:
         with self._lock():
             account, accounts = self._resolve(identifier)
             current = self.read_active()
+            if expected_identity is not None and account.login.identity != expected_identity:
+                raise ProviderError("The selected login changed. List accounts and try again")
+            if expected_active is not None and (current is None or current.identity != expected_active):
+                raise ProviderError("The active login changed. List accounts and try again")
             if current and current.identity == account.login.identity:
                 return account.label
             if account.path is None:
@@ -152,6 +157,9 @@ class LocalAccounts:
 
     def run(self, identifier: str, args: list[str]) -> int:
         account, _ = self._resolve(identifier)
+        return self._run_account(account, args)
+
+    def _run_account(self, account: Account, args: list[str]) -> int:
         executable = shutil.which(self.command)
         if not executable:
             raise ProviderError(f"{self.command} CLI is not installed")

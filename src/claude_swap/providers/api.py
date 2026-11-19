@@ -79,7 +79,7 @@ def zai_plan_name(headers: dict[str, str]) -> str | None:
         data = get_usage(ZAI_SUBSCRIPTIONS_URL, headers)
     except ProviderError:
         return None
-    names = [display_text(item.get("productName")) for item in objects(data.get("data"))
+    names = [display_text(item.get("productName"), headers.get("Authorization")) for item in objects(data.get("data"))
              if str(item.get("valid", "true")).lower() not in ("false", "0")]
     return next((n for n in names if n), None)
 

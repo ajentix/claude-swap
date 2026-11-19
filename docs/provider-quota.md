@@ -44,7 +44,7 @@ Antigravity uses Credential Manager on Windows and Keychain on macOS. Saved logi
 
 Codex uses the direct CLI login in `~/.codex/auth.json` and saves profiles in `~/.cswap/codex/`. Use file-based Codex authentication for this workflow. ChatGPT OAuth logins have subscription quota. API-key logins can be saved and switched and show quota as unavailable.
 
-Saved Codex logins stay usable: when one is more than 8 days past its last refresh, its access token is about to expire, or a usage read returns 401, cswap refreshes it the way the Codex CLI does and writes the new tokens to that profile, only if the file still holds the token it used. The live `~/.codex/auth.json` login is never refreshed by cswap, because a running Codex owns it and refresh tokens work once. A spent token shows `Codex login expired`: sign in with `codex`, then run `cswap codex add` again.
+When a saved Codex login is more than 8 days past its last refresh, nearly expired, or returns 401 to a usage request, cswap can refresh it after verifying its account identity. Refresh, activation, and a scoped run of the same login wait for each other. The live login remains under Codex CLI's control. For an expired saved login, sign in with `codex` and run `cswap codex add` again. The `codex auto --dry-run` command only reads usage.
 
 ### Automatic Codex switching
 

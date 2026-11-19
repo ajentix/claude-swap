@@ -64,7 +64,7 @@ def codex_target(monkeypatch):
 
     def get(url, headers):
         assert url == reset.CODEX_CREDITS_URL
-        assert headers == target.headers
+        assert headers == {**target.headers, **codex.CREDIT_HEADERS}
         return codex_details()
 
     monkeypatch.setattr(reset, "get_usage", get)
@@ -76,7 +76,7 @@ def test_lost_response_reuses_exact_request_and_credit(monkeypatch, tmp_path, co
 
     def post(url, headers, payload):
         assert url == reset.CODEX_CREDITS_URL + "/consume"
-        assert headers == codex_target.headers
+        assert headers == {**codex_target.headers, **codex.CREDIT_HEADERS}
         posts.append(payload)
         if len(posts) == 1:
             raise common.ProviderError("Usage endpoint unavailable")

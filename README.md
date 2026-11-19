@@ -13,7 +13,7 @@ This repository (ajentix/claude-swap) adds Antigravity, Codex and coding-plan li
 uv tool install --force git+https://github.com/ajentix/claude-swap.git
 ```
 
-Update by running the same command again. `cswap upgrade`, `uv tool upgrade` and `pipx upgrade` install the upstream PyPI release, which does not have these additions.
+Update the fork by running the same command again. The in-app update notices refer to the upstream PyPI release.
 
 The PyPI package below is the upstream release.
 
@@ -206,7 +206,7 @@ Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usag
 
 `cswap quota` shows remaining quota across Claude, Antigravity, Codex, Kimi Coding, z.ai and OpenCode Go. Open **All Providers Quota** with `p` in the TUI. See [provider setup and commands](docs/provider-quota.md).
 
-`cswap watch` shows your Antigravity, Codex and coding-plan limits beside your Claude accounts, drawn the same way and switchable with `s`; a login with the same email joins that Claude card. Nothing to configure for what cswap manages, and your own sources plug in with a command. See [other accounts on the watch screen](docs/watch-external-sources.md).
+`cswap watch` shows Antigravity, Codex and coding-plan limits beside Claude. Use `s` to select a switchable account. Set `merge = true` on a source to combine accounts with matching emails. See [other accounts on the watch screen](docs/watch-external-sources.md).
 
 ### Refresh expired tokens
 

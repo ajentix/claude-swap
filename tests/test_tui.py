@@ -1361,6 +1361,28 @@ class TestWatchScreen:
             assert app.screen.query_one("#accounts", ListView).index is None
             assert app.snapshot.active_number == "2"
 
+    async def test_external_refresh_keeps_selected_account(self, tmp_path, monkeypatch):
+        from textual.widgets import ListView
+
+        from claude_swap import external
+        from claude_swap.tui.widgets import ExternalItem
+
+        codex = external.ExternalAccount("codex", "personal", switchable=True)
+        monkeypatch.setattr(external, "stored", lambda src: [codex] if src.name == "codex" else [])
+        monkeypatch.setattr(external, "fetch", lambda src, **_: external.stored(src))
+        app = make_app(self._fake(tmp_path))
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await settle(pilot)
+            await pilot.press("s")
+            view = app.screen.query_one(ListView)
+            view.index = next(i for i, item in enumerate(view.children) if isinstance(item, ExternalItem))
+            await app.screen._external_loaded("agy", [external.ExternalAccount("agy", "other", switchable=True)])
+            assert view.highlighted_child.key == ("codex", "personal")
+            await app.screen._external_loaded("codex", [])
+            assert view.index is None
+
     async def test_escape_disarms_then_leaves(self, tmp_path):
         fake = self._fake(tmp_path)
         app = make_app(fake)
