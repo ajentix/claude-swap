@@ -185,7 +185,8 @@ class TestRows:
         text = widgets.ext_rows(acc, "agy", 120, 16).plain
         lines = text.strip("\n").split("\n")
         assert len(lines) == 2
-        assert lines[0].startswith("    agy Claude 5h   ") and "20%" in lines[0] and "agy active" in lines[0]
+        assert lines[0].startswith("    agy Claude 5h   ") and "20%" in lines[0]
+        assert "active" not in text  # the header carries it
         assert lines[1].startswith("    agy Claude 7d   ") and "blocked" in lines[1]
         assert lines[0].index("━") == lines[1].index("─")  # bars start on the same column
 
@@ -204,3 +205,61 @@ class TestRows:
         header, row = card.plain.split("\n")
         assert header.strip().startswith("b@example.com")
         assert row.startswith("    agy Gemini 7d ") and "100%" in row and "(!)" in row
+
+
+class TestHeader:
+    def test_product_segments_in_claude_order(self):
+        acc = external.ExternalAccount("codex", "a@example.com", active=True, plan="plus",
+                                       note="2 reset credits", product="Codex")
+        assert widgets.ext_header_bits(acc, "Codex").plain == (
+            "   ● Codex active   · Codex Plus   · Codex 2 reset credits")
+        plan = external.ExternalAccount("plans", "zai-glm", plan="pro", product="GLM")
+        assert widgets.ext_header_bits(plan, "").plain == "   · GLM Pro"
+
+    def test_standalone_card_header(self):
+        acc = external.ExternalAccount("agy", "b@example.com", active=True, product="agy",
+                                       windows=(external.ExternalWindow("Claude 5h", 5.0),))
+        header = widgets.external_card_text(acc, 120, prefix="agy").plain.split("\n")[0]
+        assert header == "    b@example.com   ● agy active"
+
+
+class TestCodex:
+    def test_window_label_from_its_length(self):
+        from claude_swap.providers.codex import window_label
+
+        assert [window_label(s, "5h") for s in (18000, 604800, 2592000, 7200, 90, None, True)] == [
+            "5h", "7d", "30d", "2h", "2m", "5h", "5h"]
+
+    def test_free_plan_month_window_and_team_credit_pool(self):
+        from claude_swap.providers.codex import parse_codex
+
+        windows, plan = parse_codex({
+            "plan_type": "free",
+            "rate_limit": {"primary_window": {"used_percent": 30, "limit_window_seconds": 2592000,
+                                              "reset_at": 4102444800}, "secondary_window": None},
+        }, ())
+        assert plan == "free"
+        assert [(w.name, w.remaining_pct) for w in windows] == [("30d", 70.0)]
+        windows, _ = parse_codex({
+            "plan_type": "enterprise", "rate_limit": None,
+            "spend_control": {"individual_limit": {"remaining_percent": 64, "resets_at": "2099-01-01T00:00:00Z"}},
+        }, ())
+        assert [(w.name, w.remaining_pct) for w in windows] == [("credits", 64.0)]
+
+    def test_cloudflare_403_is_an_edge_block(self, monkeypatch):
+        import io
+        from urllib.error import HTTPError
+
+        from claude_swap.providers import api
+        from claude_swap.providers.common import ProviderError
+
+        def opener(*_a, **_k):
+            class O:
+                def open(self, request, timeout):
+                    raise HTTPError(request.full_url, 403, "Forbidden", {},
+                                    io.BytesIO(b"<!DOCTYPE html><html><title>Just a moment...</title> cf-chl"))
+            return O()
+
+        monkeypatch.setattr(api, "build_opener", opener)
+        with pytest.raises(ProviderError, match="edge"):
+            api.get_usage("https://chatgpt.com/backend-api/wham/usage", {})

@@ -47,6 +47,13 @@ def _request_json(url: str, headers: dict[str, str], body: bytes | None = None, 
         messages = {401: "authentication required", 403: "access denied or subscription unavailable", 429: "rate limited"}
         message = messages.get(code, "usage request failed")
         with exc:
+            if code == 403 and url != CODING_ENDPOINTS["opencode-go"][0]:
+                try:  # a Cloudflare challenge page is an edge block, not a lost subscription
+                    head = exc.read(2048).decode("utf-8", "replace").lower()
+                    if "<html" in head or "cloudflare" in head or "cf-chl" in head:
+                        message = "blocked by the provider's edge (Cloudflare); try again later"
+                except (OSError, ValueError):
+                    pass
             if code == 403 and url == CODING_ENDPOINTS["opencode-go"][0]:
                 try:
                     body = object_dict(json.loads(exc.read(4096)))

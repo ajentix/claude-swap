@@ -23,7 +23,7 @@ source backed by your own commands::
 
 ``list`` prints a JSON array, one object per account::
 
-    {"account": "me@example.com", "active": true, "plan": "pro", "note": "", "error": "",
+    {"account": "me@example.com", "product": "Kimi", "active": true, "plan": "pro", "note": "", "error": "",
      "windows": [{"name": "Kimi 5h", "used_pct": 18.0, "resets_at": "2026-11-19T08:13:00Z", "note": ""}]}
 
 ``used_pct`` is the share used (null: no figure, ``note`` says why);
@@ -71,6 +71,7 @@ class ExternalAccount:
     windows: tuple[ExternalWindow, ...] = ()
     switchable: bool = False
     fetched_at: float | None = None
+    product: str = ""  # header name ("Codex", "GLM"); default: the source label
 
     @property
     def key(self) -> tuple[str, str]:
@@ -178,6 +179,7 @@ def _parse(source: Source, rows: list, fetched_at: float | None) -> list[Externa
             error=str(row.get("error") or ""),
             windows=windows,
             switchable=(bool(source.switch_cmd) or bool(row.get("switchable"))) and row["account"] != "-",
+            product=str(row.get("product") or ""),
             fetched_at=fetched_at,
         ))
     return accounts
@@ -313,6 +315,18 @@ def _iso(value: object) -> str | None:
         return None
 
 
+def _window_order(w) -> tuple:
+    """Claude rows read 5h, 7d, then per-model; external windows follow the same
+    order: Claude family first, then by window length."""
+    family, _, period = w.name.replace("Claude and GPT", "Claude").rpartition(" ")
+    unit = {"m": 60, "h": 3600, "d": 86400}.get(period[-1:], 0)
+    try:
+        seconds = float(period[:-1]) * unit if unit else float("inf")
+    except ValueError:
+        seconds = float("inf")
+    return (family != "Claude", family, seconds, w.name)
+
+
 def _builtin_rows(source: Source, force: bool) -> list[dict]:
     from claude_swap.providers.quota import collect_quota
 
@@ -331,6 +345,7 @@ def _builtin_rows(source: Source, force: bool) -> list[dict]:
             note = f"{credits.available_count} reset credit{'s' if credits.available_count != 1 else ''}"
         rows.append({
             "account": account,
+            "product": product or source.label,
             "active": row.active,
             "plan": row.plan,
             "note": note,
@@ -338,10 +353,10 @@ def _builtin_rows(source: Source, force: bool) -> list[dict]:
             "switchable": bool(row.switchable),
             "windows": [{
                 "name": " ".join(x for x in (product, w.name.replace("Claude and GPT", "Claude")) if x),
-                "used_pct": None if w.remaining_pct is None else round(100 - w.remaining_pct, 1),
+                "used_pct": None if w.disabled or w.remaining_pct is None else round(100 - w.remaining_pct, 1),
                 "resets_at": w.resets_at,
                 "note": "blocked" if w.disabled else "",
-            } for w in row.windows],
+            } for w in sorted(row.windows, key=_window_order)],
         })
     return rows
 

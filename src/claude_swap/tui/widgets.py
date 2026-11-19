@@ -9,6 +9,7 @@ auto-switch trigger line), and stale-measurement dimming.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING, Callable
 
 from rich.cells import cell_len
@@ -210,7 +211,7 @@ def fit_login(build: Callable[[str | None], list[Text]], budget: int) -> list[Te
     return rows
 
 
-def _append_plan(text: Text, acc: AccountSnapshot, gap: str, palette) -> None:
+def _append_plan(text: Text, acc: AccountSnapshot, gap: str, palette, product: str = "") -> None:
     """``· Ultra`` after the header — the same marker ``cswap list`` prints:
     a lapsed subscription is a highlighted ``Free`` rather than an appended
     "expired", and the age follows once the plan has gone two TTLs without
@@ -219,7 +220,7 @@ def _append_plan(text: Text, acc: AccountSnapshot, gap: str, palette) -> None:
     if not record:
         return
     plan = record["plan"]
-    text.append(f"{gap}· ", style=palette.muted)
+    text.append(f"{gap}· {product + ' ' if product else ''}", style=palette.muted)
     text.append(
         subscription.plan_label(plan),
         style=palette.sev_warn if subscription.is_expired(plan) else palette.muted,
@@ -277,12 +278,13 @@ def account_card_text(
     if show_tag:
         text.append(f"  [{acc.display_tag}]", style=palette.muted)
     if acc.is_active:
-        text.append("   ● active", style=f"bold {palette.accent}")
+        product = label_prefix.strip()
+        text.append(f"   ● {product + ' ' if product else ''}active", style=f"bold {palette.accent}")
     if acc.disabled:
         text.append("   (disabled)", style=palette.muted)
     for badge in _policy_badges(acc, "   "):
         text.append(badge, style=palette.muted)
-    _append_plan(text, acc, "   ", palette)
+    _append_plan(text, acc, "   ", palette, label_prefix.strip())
     age = data.format_age(acc.usage.age_s)
     if age:
         text.append(f"   {age}", style=palette.muted)
@@ -553,9 +555,25 @@ class AccountCard(Static):
             show_tag=self.app.tag_shown(self._acc),
         )
         if self._extras:
+            # Each merged product adds its header segments to the first line and
+            # its rows below the Claude rows.
+            cut = card.plain.find("\n")
+            cut = len(card.plain) if cut < 0 else cut
+            head, rows = card[:cut], card[cut:]
+            # Notes (reset credits) only while the header still fits one line.
+            for with_notes in (True, False):
+                line = head.copy()
+                for prefix, ext in self._extras:
+                    line.append_text(ext_header_bits(ext if with_notes else replace(ext, note=""), prefix,
+                                                     palette=palette))
+                if cell_len(line.plain) <= width:
+                    break
+            head = line
             label_w = self._label_w or max(ext_label_width(ext, p) for p, ext in self._extras)
             for prefix, ext in self._extras:
-                card.append(ext_rows(ext, prefix, width, label_w, palette=palette))
+                rows.append_text(ext_rows(ext, prefix, width, label_w, palette=palette))
+            card = head
+            card.append_text(rows)
         return card
 
 
@@ -651,11 +669,27 @@ def ext_rows(acc: "ExternalAccount", prefix: str, width: int, label_w: int, *, p
         else:
             text.append(usage_bar(label, w.used_pct, _ext_suffix(acc, w, width, label_w, bar_w) or None,
                                   bar_w, palette=palette))
-        if i == 0 and acc.active:
-            text.append(f"   ● {prefix or acc.source} active", style=f"bold {palette.accent}")
     if acc.error:
         text.append("\n    ")
         text.append(f"⚠ {acc.error}", style=palette.sev_warn)
+    return text
+
+
+def _plan_text(plan: str) -> str:
+    return plan[:1].upper() + plan[1:] if plan.islower() else plan
+
+
+def ext_header_bits(acc: "ExternalAccount", prefix: str, *, palette: Palette = Palette.DARK) -> Text:
+    """The header segments a product adds, in the Claude header's order and
+    wording: ``● Codex active``, ``· Codex Plus``, then any note."""
+    product = acc.product or prefix or acc.source
+    text = Text()
+    if acc.active:
+        text.append(f"   ● {product} active", style=f"bold {palette.accent}")
+    if acc.plan:
+        text.append(f"   · {product} {_plan_text(acc.plan)}", style=palette.muted)
+    if acc.note:
+        text.append(f"   · {product} {acc.note}", style=palette.muted)
     return text
 
 
@@ -669,9 +703,10 @@ def external_card_text(acc: "ExternalAccount", width: int, *, prefix: str = "", 
                        palette: Palette = Palette.DARK) -> Text:
     text = Text("    ")
     text.append(acc.account, style=palette.foreground)
-    for note in (f"· {acc.plan}" if acc.plan else None, f"· {acc.note}" if acc.note else None, _age(acc)):
-        if note:
-            text.append(f"   {note}", style=palette.muted)
+    text.append(ext_header_bits(acc, prefix, palette=palette))
+    age = _age(acc)
+    if age:
+        text.append(f"   {age}", style=palette.muted)
     text.append(ext_rows(acc, prefix, width, label_w or ext_label_width(acc, prefix), palette=palette))
     return text
 

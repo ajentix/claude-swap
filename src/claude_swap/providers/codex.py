@@ -16,6 +16,21 @@ from .common import (
 from .reset_credits import CODEX_CREDITS_URL, codex_reset_inventory
 
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+# The reset-credit detail call wants the headers the Codex desktop app sends
+# (openai/codex, CodexBar, OpenUsage).
+CREDIT_HEADERS = {"OpenAI-Beta": "codex-1", "originator": "Codex Desktop"}
+
+
+def window_label(seconds: object, default: str) -> str:
+    """A window's name from its length: 18000 -> "5h", 604800 -> "7d",
+    2592000 -> "30d" (Free plans); the slot's default only when no length came."""
+    if type(seconds) is not int or seconds <= 0:
+        return default
+    if seconds % 86400 == 0:
+        return f"{seconds // 86400}d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    return f"{max(1, round(seconds / 60))}m"
 
 
 class CodexAccounts(LocalAccounts):
@@ -82,12 +97,17 @@ def parse_codex(data: dict, secrets: tuple[str, ...]) -> tuple:
             entry = object_dict(limit.get(key))
             if not entry:
                 continue
-            seconds = entry.get("limit_window_seconds")
-            label = {18000: "5h", 604800: "7d"}.get(seconds, default) if isinstance(seconds, int) else default
+            label = window_label(entry.get("limit_window_seconds"), default)
             reset = entry.get("reset_at", entry.get("resets_at"))
             if reset is None and type(entry.get("reset_after_seconds")) in (float, int):
                 reset = time.time() + entry["reset_after_seconds"]
             windows.append(window(prefix + label, entry.get("used_percent"), reset, offset=100, scale=-1))
+    # Team/Enterprise: a monthly credit pool instead of (or beside) the windows.
+    spend = object_dict(object_dict(data.get("spend_control")).get("individual_limit")) \
+        or object_dict(data.get("individual_limit"))
+    if spend.get("remaining_percent") is not None:
+        windows.append(window("credits", spend.get("remaining_percent"),
+                              spend.get("resets_at", spend.get("reset_at"))))
     return tuple(windows), display_text(data.get("plan_type"), *secrets)
 
 
@@ -119,7 +139,7 @@ def codex_quota(account: Account) -> ProviderAccountQuota:
         credits, _ = codex_reset_inventory(object_dict(raw.get("rate_limit_reset_credits")))
         if credits and credits.available_count and credits.next_expiry is None:
             try:
-                details, _ = codex_reset_inventory(get_usage(CODEX_CREDITS_URL, headers, timeout=2))
+                details, _ = codex_reset_inventory(get_usage(CODEX_CREDITS_URL, {**headers, **CREDIT_HEADERS}, timeout=10))
                 credits = details or credits
             except ProviderError:
                 pass  # The primary usage read still has the reported credit count.
