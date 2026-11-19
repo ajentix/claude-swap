@@ -54,7 +54,7 @@ def claude_reset_offers(data: dict, *, now: str | None = None) -> tuple[ResetCre
     block = object_dict(data.get("cedar_ember"))
     eligible = block.get("eligible")
     if eligible is False:
-        return ResetCredits(0, redeemable_count=0), []
+        return ResetCredits(0, redeemable_count=0, eligible=False), []
     if eligible is not True or not isinstance(block.get("grants"), list):
         return None, []
     now = now or _utc_now()

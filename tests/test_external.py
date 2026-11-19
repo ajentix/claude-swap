@@ -359,7 +359,9 @@ class TestResetCreditsAndNotStarted:
             "cedar_ember": {"eligible": False},
         })
         assert result["reset_credits"]["available_count"] == 0
-        assert widgets.reset_credit_text("Claude", result["reset_credits"]) == "Claude 0 reset credits"
+        # eligible: false (e.g. ineligible_reason "surface") is not the same as zero left
+        assert widgets.reset_credit_text("Claude", result["reset_credits"]) == "Claude reset credits not offered"
+        assert widgets.reset_credit_text("Claude", {"available_count": 0, "eligible": True}) == "Claude 0 reset credits"
         assert "reset_credits" not in (oauth.build_usage_result({"five_hour": {"utilization": 1}}) or {})
 
     def test_one_wording_for_every_product(self):

@@ -45,6 +45,7 @@ class ResetCredits:
     redeemable_count: int | None = None
     cooldown_until: str | None = None
     by_scope: dict[str, int] = field(default_factory=dict)
+    eligible: bool | None = None  # False: the provider offers this login no reset credits at all
 
 
 @dataclass(frozen=True)
@@ -166,6 +167,8 @@ def quota_cells(item: QuotaWindow, now: datetime) -> tuple[str, str]:
 
 
 def reset_credit_cells(credits: ResetCredits, now: datetime) -> tuple[str, str, str]:
+    if credits.eligible is False:
+        return "not offered", "-", ""
     reason = ""
     if credits.cooldown_until:
         reason = f"Cooldown until {reset_clock(credits.cooldown_until, now)}"

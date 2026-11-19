@@ -321,6 +321,8 @@ def _credits(value: object) -> dict | None:
                   if type(scopes.get(name)) is int and scopes[name] >= 0}
         if counts:
             credits["by_scope"] = counts
+    if value.get("eligible") is False:
+        credits["eligible"] = False
     return credits
 
 
@@ -469,6 +471,7 @@ def _builtin_rows(source: Source, force: bool) -> list[dict]:
             "fetched_at": row.fetched_at,
             "reset_credits": None if credits is None else {
                 "available": credits.available_count, "next_expiry": credits.next_expiry, "by_scope": credits.by_scope,
+                **({"eligible": False} if credits.eligible is False else {}),
             },
             "switchable": bool(row.switchable),
             "windows": [{

@@ -689,6 +689,8 @@ NOT_STARTED = "not started"
 
 def reset_credit_text(product: str, credits: dict, now: float | None = None) -> str:
     """``Codex 1 reset credit until Dec 13 06:36``: one wording for every product."""
+    if credits.get("eligible") is False:
+        return f"{product} reset credits not offered"
     count = credits.get("available", credits.get("available_count"))
     count = count if type(count) is int and count >= 0 else 0
     text = f"{product} {count} reset credit{'' if count == 1 else 's'}"
