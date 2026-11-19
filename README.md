@@ -7,6 +7,16 @@ Multi-account switcher for Claude Code. Easily switch between multiple Claude ac
 
 ## Installation
 
+This repository (ajentix/claude-swap) adds Antigravity, Codex and coding-plan limits to `cswap watch` on top of [realiti4/claude-swap](https://github.com/realiti4/claude-swap). Install it from here:
+
+```bash
+uv tool install --force git+https://github.com/ajentix/claude-swap.git
+```
+
+Update by running the same command again. `cswap upgrade`, `uv tool upgrade` and `pipx upgrade` install the upstream PyPI release, which does not have these additions.
+
+The PyPI package below is the upstream release.
+
 ### Using uv (recommended)
 
 ```bash
