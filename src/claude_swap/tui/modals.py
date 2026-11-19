@@ -61,6 +61,41 @@ class ConfirmModal(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class ChoiceModal(ModalScreen["str | None"]):
+    """Pick one of a few actions; dismisses with its id, or None on Esc.
+
+    Same keys as :class:`ConfirmModal`: ←/→ between buttons, Enter presses,
+    Esc cancels.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("left", "app.focus_previous", show=False),
+        Binding("right", "app.focus_next", show=False),
+    ]
+
+    def __init__(self, message: str, choices: list[tuple[str, str]], *, title: str = "Choose") -> None:
+        super().__init__()
+        self._title = title
+        self._message = message
+        self._choices = choices
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal-box"):
+            yield Label(self._title, classes="modal-title")
+            yield Static(self._message, classes="modal-body")
+            with Horizontal(classes="modal-buttons"):
+                for choice_id, label in self._choices:
+                    yield Button(label, id=f"choice-{choice_id}")
+            yield Static("← → · enter  ·  esc cancel", classes="modal-hint")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss((event.button.id or "").removeprefix("choice-") or None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 @dataclass
 class TokenForm:
     """What the add-token modal collects."""

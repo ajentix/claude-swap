@@ -140,7 +140,7 @@ MenuItem Static.menu-item-muted { color: $secondary; }
 
 /* -- modals ----------------------------------------------------------------- */
 
-ConfirmModal, AddTokenModal, OutputModal {
+ConfirmModal, ChoiceModal, AddTokenModal, OutputModal {
     align: center middle;
     background: $background 60%;
 }

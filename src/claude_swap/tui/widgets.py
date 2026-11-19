@@ -524,18 +524,29 @@ class AccountCard(Static):
         super().__init__()
         self._acc = acc
         self._threshold = threshold
+        self._extras: list = []  # (prefix, ExternalAccount) with this card's email
 
     def set_account(self, acc: AccountSnapshot) -> None:
         self._acc = acc
         self.refresh(layout=True)
 
+    def set_extras(self, extras: list) -> None:
+        if extras != self._extras:
+            self._extras = list(extras)
+            self.refresh(layout=True)
+
     def render(self) -> Text:
         width = self.size.width or 80
-        return fitted_card_text(
-            self._acc, width, width, threshold=self._threshold,
-            palette=Palette.from_theme(self.app.current_theme),
+        palette = Palette.from_theme(self.app.current_theme)
+        card = fitted_card_text(
+            self._acc, width, width, threshold=self._threshold, palette=palette,
             show_tag=self.app.tag_shown(self._acc),
         )
+        if self._extras:
+            label_w = max(CLAUDE_LABEL, *(ext_label_width(ext, p) for p, ext in self._extras))
+            for prefix, ext in self._extras:
+                card.append(ext_rows(ext, prefix, width, label_w, palette=palette))
+        return card
 
 
 class AccountItem(ListItem):
@@ -545,11 +556,17 @@ class AccountItem(ListItem):
         super().__init__(AccountCard(acc))
         self.number = acc.number
         self.email = acc.email
+        self.extras: list = []
 
     def set_account(self, acc: AccountSnapshot) -> None:
         self.number = acc.number
         self.email = acc.email
         self.query_one(AccountCard).set_account(acc)
+
+    def set_extras(self, extras: list) -> None:
+        """External accounts with this email, drawn under the Claude rows."""
+        self.extras = list(extras)
+        self.query_one(AccountCard).set_extras(extras)
 
 
 class MenuItem(ListItem):
@@ -612,12 +629,40 @@ def _family_bar(label: str, wins: list, width: int, palette: Palette) -> Text:
     return usage_bar(label, top.used_pct, suffix, width, palette=palette)
 
 
-def external_card_text(acc: "ExternalAccount", width: int, *, palette: Palette = Palette.DARK) -> Text:
-    groups = _window_rows(acc)
+def ext_label_width(acc: "ExternalAccount", prefix: str) -> int:
+    return max((len(f"{prefix} {family}".strip()) for family, _ in _window_rows(acc)), default=0)
+
+
+def ext_rows(acc: "ExternalAccount", prefix: str, width: int, label_w: int, *, palette: Palette = Palette.DARK) -> Text:
+    """The account's family rows, each on its own indented line, labelled
+    ``<prefix> <family>``; the first row carries the source's active marker."""
     text = Text()
-    age = None
+    bar_w = _ext_bar_width(width, label_w)
+    for i, (family, wins) in enumerate(_window_rows(acc)):
+        label = f"{prefix} {family}".strip()
+        text.append("\n    ")
+        text.append(_family_bar(f"{label:<{label_w}}", wins, bar_w, palette))
+        if i == 0:
+            if acc.active:
+                text.append(f"   ● {prefix or acc.source} active", style=f"bold {palette.accent}")
+            if acc.note:
+                text.append(f"   {acc.note}", style=palette.muted)
+    if acc.error:
+        text.append("\n    ")
+        text.append(f"⚠ {prefix or acc.source}: {acc.error}", style=palette.sev_warn)
+    return text
+
+
+def _age(acc: "ExternalAccount") -> str | None:
     if acc.fetched_at is not None and time.time() - acc.fetched_at >= 60:
-        age = f"· {data.format_duration(time.time() - acc.fetched_at)} ago"
+        return f"· {data.format_duration(time.time() - acc.fetched_at)} ago"
+    return None
+
+
+def external_card_text(acc: "ExternalAccount", width: int, *, prefix: str = "", palette: Palette = Palette.DARK) -> Text:
+    groups = _window_rows(acc)
+    age = _age(acc)
+    text = Text()
     if [f for f, _ in groups] in ([""], []):  # one line: name, bar, figures
         label = acc.account + (f" · {acc.plan}" if acc.plan else "")
         label = f"{label:<{EXT_PLAN_LABEL}}"
@@ -626,8 +671,7 @@ def external_card_text(acc: "ExternalAccount", width: int, *, palette: Palette =
             text.append(label + " ", style=palette.foreground)
             text.append(acc.error or "usage unavailable", style=palette.sev_warn if acc.error else palette.muted)
             return text
-        bar_w = _ext_bar_width(width, EXT_PLAN_LABEL)
-        line = _family_bar(label, groups[0][1], bar_w, palette)
+        line = _family_bar(label, groups[0][1], _ext_bar_width(width, EXT_PLAN_LABEL), palette)
         line.stylize(palette.foreground, 0, len(label))
         text.append(line)
         if age:
@@ -635,35 +679,26 @@ def external_card_text(acc: "ExternalAccount", width: int, *, palette: Palette =
         return text
     text.append("    ")
     text.append(acc.account, style=palette.foreground)
-    if acc.active:
-        text.append("   ● active", style=f"bold {palette.accent}")
-    if acc.plan:
-        text.append(f"   · {acc.plan}", style=palette.muted)
-    for note in (acc.note, age):
+    for note in (f"· {acc.plan}" if acc.plan else None, age):
         if note:
             text.append(f"   {note}", style=palette.muted)
-    label_w = max(len(f) for f, _ in groups)
-    bar_w = _ext_bar_width(width, label_w)
-    for family, wins in groups:
-        text.append("\n    ")
-        text.append(_family_bar(f"{family:<{label_w}}", wins, bar_w, palette))
-    if acc.error:
-        text.append("\n    ")
-        text.append(f"⚠ {acc.error}", style=palette.sev_warn)
+    text.append(ext_rows(acc, prefix, width, max(CLAUDE_LABEL, ext_label_width(acc, prefix)), palette=palette))
     return text
 
 
 class ExternalCard(Static):
-    def __init__(self, acc: "ExternalAccount") -> None:
+    def __init__(self, acc: "ExternalAccount", prefix: str = "") -> None:
         super().__init__()
         self._acc = acc
+        self._prefix = prefix
 
     def set_account(self, acc: "ExternalAccount") -> None:
         self._acc = acc
         self.refresh(layout=True)
 
     def render(self) -> Text:
-        return external_card_text(self._acc, self.size.width or 80, palette=Palette.from_theme(self.app.current_theme))
+        return external_card_text(self._acc, self.size.width or 80, prefix=self._prefix,
+                                  palette=Palette.from_theme(self.app.current_theme))
 
 
 class ExternalRow(ListItem):
@@ -683,8 +718,8 @@ class ExternalHeader(ExternalRow):
 class ExternalItem(ExternalRow):
     """One external-source account; one-line sources pack tight."""
 
-    def __init__(self, acc: "ExternalAccount", *, tight: bool = False) -> None:
-        super().__init__(ExternalCard(acc), classes="ext-tight" if tight else "")
+    def __init__(self, acc: "ExternalAccount", *, prefix: str = "", tight: bool = False) -> None:
+        super().__init__(ExternalCard(acc, prefix), classes="ext-tight" if tight else "")
         self.acc = acc
         self.key = acc.key
 

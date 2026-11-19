@@ -28,6 +28,7 @@ from textual.widgets import Footer, ListView, Static
 
 from claude_swap import external
 from claude_swap.models import AccountsSnapshot
+from claude_swap.tui.modals import ChoiceModal
 from claude_swap.tui.widgets import (
     AccountItem, AccountsPanel, ExternalHeader, ExternalItem, ExternalRow, MenuItem,
 )
@@ -400,12 +401,23 @@ class WatchScreen(AccountListScreen):
     async def _sync_external(self) -> None:
         async with self._list_lock:
             listview = self.query_one("#accounts", ListView)
+            # A merge source's account with a Claude account's email goes on that
+            # card; the rest get their own section after the Claude accounts.
+            emails = {i.email for i in listview.query(AccountItem)}
+            merged: dict[str, list] = {}
             wanted: list = []  # ("header", name, title) or an account
             for name, source in self._sources.items():
-                accounts = self._external.get(name, [])
-                if accounts:
+                rest = []
+                for acc in self._external.get(name, []):
+                    if source.merge and acc.account in emails:
+                        merged.setdefault(acc.account, []).append((source.label, acc))
+                    else:
+                        rest.append(acc)
+                if rest:
                     wanted.append(("header", name, source.title))
-                    wanted.extend(accounts)
+                    wanted.extend(rest)
+            for item in listview.query(AccountItem):
+                item.set_extras(merged.get(item.email, []))
             keys = [w[:2] if isinstance(w, tuple) else w.key for w in wanted]
             items = list(listview.query(ExternalRow))
             if [i.key for i in items] == keys:
@@ -423,7 +435,8 @@ class WatchScreen(AccountListScreen):
                     continue
                 one_line = all(" " not in x.name for x in w.windows)
                 nxt = wanted[n + 1] if n + 1 < len(wanted) else None
-                rows.append(ExternalItem(w, tight=one_line and nxt is not None and not isinstance(nxt, tuple)))
+                rows.append(ExternalItem(w, prefix=self._sources[w.source].label,
+                                         tight=one_line and nxt is not None and not isinstance(nxt, tuple)))
             await listview.extend(rows)
             if self._selecting and index is not None:
                 listview.index = min(index, len(listview.children) - 1)
@@ -432,6 +445,21 @@ class WatchScreen(AccountListScreen):
         async with self._list_lock:
             await super()._on_snapshot(snap)
         await self._sync_external()  # a Claude rebuild clears the whole list
+
+    def _choose_switch(self, number: str, email: str, extras: list) -> None:
+        """One email on Claude and another source: ask which to switch."""
+        choices = [("claude", "Claude Code")]
+        choices += [(acc.source, prefix or acc.source) for prefix, acc in extras]
+        choices.append(("all", "Both" if len(extras) == 1 else "All"))
+
+        def chosen(choice: str | None) -> None:
+            if choice in ("claude", "all"):
+                self.app.do_switch(number)
+            for _prefix, acc in extras:
+                if choice in (acc.source, "all"):
+                    self._switch_external(acc)
+
+        self.app.push_screen(ChoiceModal(f"Switch {email} on:", choices, title="Switch"), chosen)
 
     def _switch_external(self, acc: external.ExternalAccount) -> None:
         source = self._sources.get(acc.source)
@@ -504,7 +532,11 @@ class WatchScreen(AccountListScreen):
             return  # e.g. a stray click while just watching
         item = event.item
         if isinstance(item, AccountItem):
-            self.app.do_switch(item.number)
+            extras = [(p, acc) for p, acc in item.extras if acc.switchable]
+            if extras:
+                self._choose_switch(item.number, item.email, extras)
+            else:
+                self.app.do_switch(item.number)
             self._set_selecting(False)  # stay here, keep watching
         elif isinstance(item, ExternalItem):
             self._switch_external(item.acc)
