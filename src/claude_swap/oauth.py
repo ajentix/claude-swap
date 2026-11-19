@@ -1146,6 +1146,7 @@ def build_usage_result(data: dict) -> dict | None:
     return result if result else None
 
 
+
 # Label of the 5-hour window as ``relevant_windows`` reports it. The only
 # window that is NOT weekly: every consumer that treats the 5h window
 # differently (``lines.window_line``, the TUI's per-row switch-line tick) keys

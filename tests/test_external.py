@@ -90,7 +90,8 @@ class TestBuiltin:
         assert [(w.name, w.used_pct, w.note) for w in a.windows] == [("Claude 5h", 20.0, ""), ("Gemini 7d", None, "blocked")]
         assert a.windows[0].resets_at == "2099-01-01T08:00:00+00:00"
         (c,) = external.fetch(codex)
-        assert (c.plan, c.note, [w.name for w in c.windows]) == ("plus", "2 reset credits", ["5h"])
+        assert (c.plan, c.note, [w.name for w in c.windows]) == ("plus", "", ["5h"])
+        assert c.reset_credits == {"available": 2, "next_expiry": None}
         (k,) = external.fetch(plans)  # the unconfigured plan stays hidden
         assert (k.account, [w.name for w in k.windows], k.switchable) == ("kimi-coding", ["Kimi 7d"], False)
 
@@ -326,3 +327,30 @@ def test_account_read_without_windows_keeps_its_last_bars(root):
     assert [(w.name, w.used_pct) for w in a.windows] == [("Claude 5h", 40.0)]
     assert a.error == "needs RAM; showing the last reading"
     assert a.fetched_at == first.fetched_at
+
+
+class TestResetCreditsAndNotStarted:
+    def test_claude_reading_keeps_its_reset_credits(self):
+        from claude_swap import oauth
+
+        result = oauth.build_usage_result({
+            "five_hour": {"utilization": 10, "resets_at": "2099-01-01T00:00:00Z"},
+            "cedar_ember": {"eligible": False},
+        })
+        assert result["reset_credits"]["available_count"] == 0
+        assert widgets.reset_credit_text("Claude", result["reset_credits"]) == "Claude 0 reset credits"
+        assert "reset_credits" not in (oauth.build_usage_result({"five_hour": {"utilization": 1}}) or {})
+
+    def test_one_wording_for_every_product(self):
+        assert widgets.reset_credit_text("Claude", {"available": 0}) == "Claude 0 reset credits"
+        line = widgets.reset_credit_text("Codex", {"available": 1, "next_expiry": "2099-12-13T06:36:00+00:00"})
+        assert line.startswith("Codex 1 reset credit until ")
+        acc = external.ExternalAccount("codex", "a@example.com", product="Codex",
+                                       reset_credits={"available": 1, "next_expiry": None})
+        assert widgets.ext_header_bits(acc, "Codex").plain == "   · Codex 1 reset credit"
+
+    def test_an_unstarted_window_says_so(self):
+        rows = widgets.usage_rows({"five_hour": {"pct": 0}}, time.time())
+        assert rows[0][2] == "not started"
+        acc = external.ExternalAccount("plans", "zai-glm", windows=(external.ExternalWindow("GLM 5h", 0.0),))
+        assert "not started" in widgets.ext_rows(acc, "", 120, 10).plain

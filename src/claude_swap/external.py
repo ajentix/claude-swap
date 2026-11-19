@@ -77,6 +77,7 @@ class ExternalAccount:
     switchable: bool = False
     fetched_at: float | None = None
     product: str = ""  # header name ("Codex", "GLM"); default: the source label
+    reset_credits: dict | None = None  # {"available": n, "next_expiry": iso}, when the product has them
 
     @property
     def key(self) -> tuple[str, str]:
@@ -203,6 +204,7 @@ def _parse(source: Source, rows: list, fetched_at: float | None) -> list[Externa
             switchable=(bool(source.switch_cmd) or (bool(source.providers) and row.get("switchable") is True))
             and row["account"] != "-",
             product=str(row.get("product") or ""),
+            reset_credits=_credits(row.get("reset_credits")),
             fetched_at=(_positive(row.get("fetched_at"), 0) or None)
             if source.providers or "fetched_at" in row else fetched_at,
         ))
@@ -306,6 +308,13 @@ def _finish(source: Source, claim: str, rows: list, error: str) -> None:
             entry.update(at=now, rows=_keep_last_windows(entry.get("rows"), rows, entry.get("at")))
         entry.update(attempted_at=now, claimed_at=0, claim=None, error=error)
         _write_store(data, source.name, entry)
+
+
+def _credits(value: object) -> dict | None:
+    if not isinstance(value, dict) or type(value.get("available")) is not int or value["available"] < 0:
+        return None
+    expiry = value.get("next_expiry")
+    return {"available": value["available"], "next_expiry": expiry if isinstance(expiry, str) else None}
 
 
 def _keep_last_windows(previous: object, rows: list, previous_at: float | None = None) -> list:
@@ -439,8 +448,6 @@ def _builtin_rows(source: Source, force: bool) -> list[dict]:
         product = PRODUCT.get(row.provider, "")
         note = ""
         credits = row.reset_credits
-        if credits and credits.available_count:
-            note = f"{credits.available_count} reset credit{'s' if credits.available_count != 1 else ''}"
         error = row.error or ""
         if row.retry_at and row.retry_at > time.time():
             retry = datetime.fromtimestamp(row.retry_at, timezone.utc).astimezone()
@@ -453,6 +460,7 @@ def _builtin_rows(source: Source, force: bool) -> list[dict]:
             "note": note,
             "error": error,
             "fetched_at": row.fetched_at,
+            "reset_credits": None if credits is None else {"available": credits.available_count, "next_expiry": credits.next_expiry},
             "switchable": bool(row.switchable),
             "windows": [{
                 "name": " ".join(x for x in (product, w.name.replace("Claude and GPT", "Claude")) if x),

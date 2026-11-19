@@ -144,6 +144,8 @@ def usage_rows(
         if window:
             reset, reset_full = _reset_parts(window, now)
             suffix, suffix_full = reset or "", reset_full or ""
+            if not suffix and window.get("pct") == 0:
+                suffix = suffix_full = NOT_STARTED
             if key == "seven_day":
                 marker = _pace_suffix(window, fetched_at)
                 if marker:
@@ -285,6 +287,9 @@ def account_card_text(
     for badge in _policy_badges(acc, "   "):
         text.append(badge, style=palette.muted)
     _append_plan(text, acc, "   ", palette, label_prefix.strip())
+    credits = acc.usage.last_good.get("reset_credits") if isinstance(acc.usage.last_good, dict) else None
+    if label_prefix and isinstance(credits, dict):
+        text.append(f"   · {reset_credit_text(label_prefix.strip(), credits)}", style=palette.muted)
     age = data.format_age(acc.usage.age_s)
     if age:
         text.append(f"   {age}", style=palette.muted)
@@ -635,6 +640,8 @@ def _ext_suffix(acc: "ExternalAccount", w: "ExternalWindow", width: int, label_w
     reset, reset_full = _reset_parts(raw, now) if w.resets_at else (None, None)
     if reset is None and w.resets:
         reset = reset_full = f"resets {w.resets}"
+    if reset is None and w.used_pct == 0:
+        reset = reset_full = NOT_STARTED
     suffix = reset or ""
     if reset_full and 4 + label_w + 1 + bar_w + 5 + 2 + len(reset_full) <= width:
         suffix = reset_full
@@ -677,6 +684,22 @@ def ext_rows(acc: "ExternalAccount", prefix: str, width: int, label_w: int, *, p
     return text
 
 
+NOT_STARTED = "not started"
+
+
+def reset_credit_text(product: str, credits: dict, now: float | None = None) -> str:
+    """``Codex 1 reset credit until Dec 13 06:36``: one wording for every product."""
+    count = credits.get("available", credits.get("available_count"))
+    count = count if type(count) is int and count >= 0 else 0
+    text = f"{product} {count} reset credit{'' if count == 1 else 's'}"
+    expiry = credits.get("next_expiry")
+    if count and isinstance(expiry, str):
+        clock = data.reset_clock({"resets_at": expiry}, time.time() if now is None else now)
+        if clock:
+            text += f" until {clock}"
+    return text
+
+
 def _plan_text(plan: str) -> str:
     return plan[:1].upper() + plan[1:] if plan.islower() else plan
 
@@ -692,6 +715,8 @@ def ext_header_bits(acc: "ExternalAccount", prefix: str, *, palette: Palette = P
         plan = _plan_text(acc.plan)
         named = plan if plan.casefold().startswith(product.casefold()) else f"{product} {plan}"
         text.append(f"   · {named}", style=palette.muted)
+    if acc.reset_credits is not None:
+        text.append(f"   · {reset_credit_text(product, acc.reset_credits)}", style=palette.muted)
     if acc.note:
         text.append(f"   · {product} {acc.note}", style=palette.muted)
     return text
