@@ -303,15 +303,16 @@ def codex_quota(account: Account, store: "CodexAccounts | None" = None, *,
             raw = get_usage(USAGE_URL, headers)
         windows, plan = parse_codex(raw, account.login.secrets)
         credits, _ = codex_reset_inventory(object_dict(raw.get("rate_limit_reset_credits")))
+        deferred_until = None
         if credits and credits.available_count and credits.next_expiry is None:
             try:
                 details, _ = codex_reset_inventory(get_usage(CODEX_CREDITS_URL, {**headers, **CREDIT_HEADERS}, timeout=10))
                 credits = details or credits
-            except ProviderError:
-                pass  # The primary usage read still has the reported credit count.
+            except ProviderError as exc:
+                deferred_until = exc.retry_after
         if credits is None and not any(item.remaining_pct is not None or item.disabled for item in windows):
             raise ProviderError("Codex returned no quota windows")
-        return replace(row, windows=windows, plan=plan, reset_credits=credits)
+        return replace(row, windows=windows, plan=plan, reset_credits=credits, retry_at=deferred_until)
     except LockError:
         return replace(row, status="unavailable", error="Saved Codex login is busy")
     except ProviderError as exc:

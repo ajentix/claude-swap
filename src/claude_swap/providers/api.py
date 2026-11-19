@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import timezone
 from email.utils import parsedate_to_datetime
+from http.client import HTTPException
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -73,20 +74,20 @@ def _request_json(url: str, headers: dict[str, str], body: bytes | None = None, 
                     head = exc.read(2048).decode("utf-8", "replace").lower()
                     if "<html" in head or "cloudflare" in head or "cf-chl" in head:
                         message = "blocked by the provider's edge (Cloudflare); try again later"
-                except (OSError, ValueError):
+                except (HTTPException, OSError, ValueError):
                     pass
             if code == 403 and url == CODING_ENDPOINTS["opencode-go"][0]:
                 try:
                     body = object_dict(json.loads(exc.read(4096)))
                     if object_dict(body.get("error")).get("type") == "EntitlementError":
                         message = "OpenCode Go subscription required"
-                except (OSError, ValueError):
+                except (HTTPException, OSError, ValueError):
                     pass
         deadline = retry_at(exc.headers.get("Retry-After")) if exc.headers else None
         if code == 429 and deadline is None:
             deadline = time.time() + 60
         raise ProviderError(f"HTTP {code}: {message}", status_code=code, retry_after=deadline) from None
-    except (URLError, OSError, ValueError) as exc:
+    except (HTTPException, URLError, OSError, ValueError) as exc:
         message = "Invalid usage response" if isinstance(exc, ValueError) else "Usage endpoint unavailable"
         raise ProviderError(message) from None
     if not isinstance(data, dict):
@@ -99,10 +100,7 @@ ZAI_SUBSCRIPTIONS_URL = "https://api.z.ai/api/biz/subscription/list"
 
 def zai_plan_name(headers: dict[str, str]) -> str | None:
     """The plan's product name ("GLM Coding Pro"); the quota endpoint only has a level."""
-    try:
-        data = get_usage(ZAI_SUBSCRIPTIONS_URL, headers)
-    except ProviderError:
-        return None
+    data = get_usage(ZAI_SUBSCRIPTIONS_URL, headers)
     names = [display_text(item.get("productName"), headers.get("Authorization")) for item in objects(data.get("data"))
              if str(item.get("valid", "true")).lower() not in ("false", "0")]
     return next((n for n in names if n), None)
@@ -210,21 +208,26 @@ def _coding_plan_row(provider: str, label: str, url: str, settings: dict) -> Pro
         headers["x-opencode-session"] = session
     try:
         credits = None
+        deferred_until = None
         data = get_usage(url, headers)
         if provider == "kimi-coding":
             windows, plan = kimi_usage(data, key)
         elif provider == "zai-glm":
             windows, plan = zai_usage(data, key)
-            plan = zai_plan_name(headers) or plan
             try:
-                reset_data = get_usage(ZAI_CREDITS_URL, {"Authorization": f"Bearer {key}"})
-                credits, _ = zai_reset_offers(reset_data)
-            except ProviderError:
-                pass
+                plan = zai_plan_name(headers) or plan
+            except ProviderError as exc:
+                deferred_until = exc.retry_after
+            if deferred_until is None:
+                try:
+                    reset_data = get_usage(ZAI_CREDITS_URL, {"Authorization": f"Bearer {key}"})
+                    credits, _ = zai_reset_offers(reset_data)
+                except ProviderError as exc:
+                    deferred_until = exc.retry_after
         else:
             windows, plan = opencode_usage(data, key, session)
         if not any(item.remaining_pct is not None for item in windows):
             raise ProviderError("Usage API returned no quota windows")
-        return replace(row, windows=windows, plan=plan, reset_credits=credits)
+        return replace(row, windows=windows, plan=plan, reset_credits=credits, retry_at=deferred_until)
     except ProviderError as exc:
         return replace(row, status="error", error=str(exc), retry_at=exc.retry_after, http_status=exc.status_code)

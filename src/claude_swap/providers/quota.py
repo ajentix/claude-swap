@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import time
 import math
+import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
@@ -85,7 +85,8 @@ def _claim(path: Path, names: tuple[str, ...], started: float, max_age: float,
                     retry_at=entry.get("retry_at"),
                 )]
                 continue
-            data[name] = {**entry, "started_at": started, "claim_until": started + CLAIM_TTL}
+            data[name] = {**entry, "started_at": started, "claim_started_at": started,
+                          "claim_until": time.time() + CLAIM_TTL}
             pending.append(name)
         if pending:
             write_json(path, data)
@@ -108,8 +109,15 @@ def _update_cache(path: Path, changes: dict) -> None:
         with FileLock(path.with_suffix(".lock"), timeout=0.5):
             data = _load_cache(path)
             for name, entry in changes.items():
-                if object_dict(data.get(name)).get("started_at", 0) <= entry["started_at"]:
+                current = object_dict(data.get(name))
+                if _deadline(current, "started_at") <= entry["started_at"]:
                     data[name] = entry
+                elif current.get("claim_started_at") == entry["started_at"]:
+                    # The accounts changed while the read ran. Drop the old rows,
+                    # but keep a server deadline and release the original claim.
+                    current.pop("claim_started_at", None)
+                    current.pop("claim_until", None)
+                    current["retry_at"] = max(_deadline(current, "retry_at"), entry["retry_at"])
             write_json(path, data)
     except (LockError, OSError, ValueError, TypeError):
         pass  # The measurement is still available when the cache cannot be written.
@@ -122,7 +130,12 @@ def invalidate_quota(provider: str, root: Path | None = None) -> None:
         with FileLock(path.with_suffix(".lock"), timeout=2):
             data = _load_cache(path)
             previous = object_dict(data.get(provider))
-            data[provider] = {"started_at": time.time(), "retry_at": previous.get("retry_at")}
+            now = time.time()
+            entry = {"started_at": now, "retry_at": previous.get("retry_at")}
+            if _deadline(previous, "claim_until") > now:
+                entry["claim_until"] = previous["claim_until"]
+                entry["claim_started_at"] = previous.get("claim_started_at", previous.get("started_at"))
+            data[provider] = entry
             write_json(path, data)
     except (OSError, LockError):
         pass

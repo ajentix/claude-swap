@@ -288,8 +288,8 @@ def account_card_text(
         text.append(badge, style=palette.muted)
     _append_plan(text, acc, "   ", palette, label_prefix.strip())
     credits = acc.usage.last_good.get("reset_credits") if isinstance(acc.usage.last_good, dict) else None
-    if label_prefix and isinstance(credits, dict):
-        text.append(f"   · {reset_credit_text(label_prefix.strip(), credits)}", style=palette.muted)
+    if isinstance(credits, dict):
+        text.append(f"   · {reset_credit_text(label_prefix.strip() or 'Claude', credits, now)}", style=palette.muted)
     age = data.format_age(acc.usage.age_s)
     if age:
         text.append(f"   {age}", style=palette.muted)
@@ -692,6 +692,9 @@ def reset_credit_text(product: str, credits: dict, now: float | None = None) -> 
     count = credits.get("available", credits.get("available_count"))
     count = count if type(count) is int and count >= 0 else 0
     text = f"{product} {count} reset credit{'' if count == 1 else 's'}"
+    scopes = credits.get("by_scope")
+    if isinstance(scopes, dict) and scopes:
+        text += " (" + ", ".join(f"{name} {amount}" for name, amount in scopes.items()) + ")"
     expiry = credits.get("next_expiry")
     if count and isinstance(expiry, str):
         clock = data.reset_clock({"resets_at": expiry}, time.time() if now is None else now)

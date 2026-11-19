@@ -330,6 +330,27 @@ def test_account_read_without_windows_keeps_its_last_bars(root):
 
 
 class TestResetCreditsAndNotStarted:
+    def test_watch_shows_scoped_glm_pack_counts(self, root, monkeypatch):
+        from claude_swap.providers import quota
+        from claude_swap.providers.common import ProviderAccountQuota, ResetCredits, QuotaWindow
+
+        row = ProviderAccountQuota("zai-glm", "default", windows=(QuotaWindow("5h", 20),),
+                                   reset_credits=ResetCredits(3, by_scope={"5h": 0, "7d": 3}))
+        monkeypatch.setattr(quota, "collect_quota", lambda *_args, **_kwargs: [row])
+        account, = external.fetch(external.BUILTIN[2])
+        assert "5h 0, 7d 3" in widgets.ext_header_bits(account, "").plain
+
+    def test_claude_card_shows_credits_without_other_products(self):
+        from claude_swap.models import AccountSnapshot
+        from claude_swap.usage_store import UsageEntry
+
+        account = AccountSnapshot(
+            number="1", email="claude@example.com", org_name="", org_uuid="", is_active=True,
+            kind="oauth", switchable=True,
+            usage=UsageEntry(last_good={"five_hour": {"pct": 40}, "reset_credits": {"available_count": 0}}),
+        )
+        assert "Claude 0 reset credits" in widgets.account_card_text(account, 120).plain
+
     def test_claude_reading_keeps_its_reset_credits(self):
         from claude_swap import oauth
 

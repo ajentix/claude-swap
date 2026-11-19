@@ -225,8 +225,9 @@ def test_codex_quota_keeps_reported_count_when_details_fail(monkeypatch, tmp_pat
             return {"rate_limit_reset_credits": {"available_count": 2}}
         assert url == reset.CODEX_CREDITS_URL and timeout == 10
         assert headers["OpenAI-Beta"] == "codex-1" and headers["originator"] == "Codex Desktop"
-        raise common.ProviderError("Usage endpoint unavailable")
+        raise common.ProviderError("HTTP 429: rate limited", status_code=429, retry_after=123.0)
 
     monkeypatch.setattr(codex, "get_usage", get)
     row = codex.codex_quota(account)
     assert row.status == "ok" and row.reset_credits.available_count == 2
+    assert row.retry_at == 123.0

@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import time
 from datetime import datetime
+from http.client import IncompleteRead
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import SimpleNamespace
@@ -411,6 +412,69 @@ def test_http_retry_after_accepts_a_duration_and_a_date():
     assert api.retry_at("14", now=1) == 15
     assert api.retry_at("Thu, 01 Jan 1970 00:01:00 GMT", now=1) == 60
     assert api.retry_at("inf", now=1) is None
+
+
+def test_invalidation_keeps_pending_read_and_provider_backoff(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    entered, release = Event(), Event()
+    calls = []
+    retry = time.time() + 600
+
+    def measure():
+        calls.append("read")
+        entered.set()
+        assert release.wait(3)
+        return common.ProviderAccountQuota("codex", "old", status="error", retry_at=retry, http_status=429)
+
+    monkeypatch.setattr(quota, "_jobs", lambda *_args, **_kwargs: [measure])
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        first = pool.submit(quota.collect_quota, ("codex",), refresh=True, root=tmp_path)
+        try:
+            assert entered.wait(3)
+            quota.invalidate_quota("codex", tmp_path)
+            pending, = quota.collect_quota(("codex",), refresh=True, root=tmp_path)
+            assert (pending.account, pending.status) == ("-", "pending")
+        finally:
+            release.set()
+        first.result(timeout=3)
+    deferred, = quota.collect_quota(("codex",), refresh=True, root=tmp_path)
+    assert (deferred.account, deferred.status, deferred.retry_at) == ("-", "backoff", retry)
+    assert calls == ["read"]
+
+
+def test_response_truncation_uses_the_same_safe_error_as_other_network_errors(monkeypatch):
+    from contextlib import nullcontext
+
+    def broken(_):
+        raise IncompleteRead(b"private-response-fragment")
+
+    monkeypatch.setattr(api, "build_opener", lambda *_: SimpleNamespace(
+        open=lambda *_, **__: nullcontext(SimpleNamespace(read=broken)),
+    ))
+    with pytest.raises(common.ProviderError, match="endpoint unavailable") as error:
+        api.post_reset(api.ZAI_CREDITS_URL, {"Authorization": "private-credential"}, {})
+    assert "private" not in str(error.value)
+
+
+@pytest.mark.parametrize("blocked_endpoint", [api.ZAI_SUBSCRIPTIONS_URL, api.ZAI_CREDITS_URL])
+def test_zai_auxiliary_rate_limit_preserves_main_quota(monkeypatch, blocked_endpoint):
+    deadline = time.time() + 90
+    calls = []
+
+    def get(url, headers):
+        calls.append(url)
+        if url == blocked_endpoint:
+            raise common.ProviderError("HTTP 429: rate limited", status_code=429, retry_after=deadline)
+        return {"data": {"limits": [{"unit": 3, "percentage": 50}]}}
+
+    monkeypatch.setattr(api, "get_usage", get)
+    url = api.CODING_ENDPOINTS["zai-glm"][0]
+    row = api._coding_plan_row("zai-glm", "personal", url, {"api_key": "test-key"})
+    assert row.status == "ok" and row.windows[0].remaining_pct == 50
+    assert row.retry_at == deadline
+    assert calls[-1] == blocked_endpoint
 
 
 def test_reset_clock_uses_korea_date():

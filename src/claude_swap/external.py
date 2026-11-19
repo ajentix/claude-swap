@@ -314,7 +314,14 @@ def _credits(value: object) -> dict | None:
     if not isinstance(value, dict) or type(value.get("available")) is not int or value["available"] < 0:
         return None
     expiry = value.get("next_expiry")
-    return {"available": value["available"], "next_expiry": expiry if isinstance(expiry, str) else None}
+    credits = {"available": value["available"], "next_expiry": expiry if isinstance(expiry, str) else None}
+    scopes = value.get("by_scope")
+    if isinstance(scopes, dict):
+        counts = {name: scopes[name] for name in ("5h", "7d")
+                  if type(scopes.get(name)) is int and scopes[name] >= 0}
+        if counts:
+            credits["by_scope"] = counts
+    return credits
 
 
 def _keep_last_windows(previous: object, rows: list, previous_at: float | None = None) -> list:
@@ -460,7 +467,9 @@ def _builtin_rows(source: Source, force: bool) -> list[dict]:
             "note": note,
             "error": error,
             "fetched_at": row.fetched_at,
-            "reset_credits": None if credits is None else {"available": credits.available_count, "next_expiry": credits.next_expiry},
+            "reset_credits": None if credits is None else {
+                "available": credits.available_count, "next_expiry": credits.next_expiry, "by_scope": credits.by_scope,
+            },
             "switchable": bool(row.switchable),
             "windows": [{
                 "name": " ".join(x for x in (product, w.name.replace("Claude and GPT", "Claude")) if x),
