@@ -170,7 +170,8 @@ def test_codex_quota_keeps_reported_count_when_details_fail(monkeypatch, tmp_pat
     def get(url, headers, *, timeout=None):
         if url == codex.USAGE_URL:
             return {"rate_limit_reset_credits": {"available_count": 2}}
-        assert url == reset.CODEX_CREDITS_URL and timeout == 2
+        assert url == reset.CODEX_CREDITS_URL and timeout == 10
+        assert headers["OpenAI-Beta"] == "codex-1" and headers["originator"] == "Codex Desktop"
         raise common.ProviderError("Usage endpoint unavailable")
 
     monkeypatch.setattr(codex, "get_usage", get)
