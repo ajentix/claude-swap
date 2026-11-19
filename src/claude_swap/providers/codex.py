@@ -92,7 +92,7 @@ class CodexAccounts(LocalAccounts):
     def stash_paths(self) -> list[Path]:
         paths = []
         for path in super().stash_paths():
-            if path.name.casefold() == STATE_NAME:
+            if path.name.casefold() in {STATE_NAME, ".account-policy.json"}:
                 continue
             if path.name.casefold() == LEGACY_STATE_NAME:
                 try:
@@ -278,7 +278,8 @@ def _stable_identity(tokens: dict) -> str | None:
 
 def codex_quota(account: Account, store: "CodexAccounts | None" = None, *,
                 refresh_login: bool = True) -> ProviderAccountQuota:
-    row = ProviderAccountQuota("codex", account.label, account.number, account.active, True)
+    row = ProviderAccountQuota("codex", account.label, account.number, account.active, True,
+                               login_ref=account.login.identity)
     store = store or CodexAccounts(home())
     try:
         if (refresh_login and not account.active and account.path is not None
@@ -294,7 +295,8 @@ def codex_quota(account: Account, store: "CodexAccounts | None" = None, *,
         try:
             raw = get_usage(USAGE_URL, headers)
         except ProviderError as exc:
-            if not refresh_login or not str(exc).startswith("HTTP 401") or account.active or account.path is None:
+            if (not refresh_login or (exc.status_code != 401 and not str(exc).startswith("HTTP 401"))
+                    or account.active or account.path is None):
                 raise
             account = refresh_saved(account, store)  # one retry with a fresh token
             _, headers = codex_oauth(account)
@@ -313,4 +315,4 @@ def codex_quota(account: Account, store: "CodexAccounts | None" = None, *,
     except LockError:
         return replace(row, status="unavailable", error="Saved Codex login is busy")
     except ProviderError as exc:
-        return replace(row, status="error", error=str(exc))
+        return replace(row, status="error", error=str(exc), retry_at=exc.retry_after, http_status=exc.status_code)

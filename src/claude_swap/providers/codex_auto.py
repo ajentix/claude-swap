@@ -26,13 +26,13 @@ import json
 import math
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from claude_swap.fsutil import atomic_write_text, read_text_with_retry
-from claude_swap.locking import FileLock
 
 from .common import ProviderAccountQuota, QuotaWindow, home
+from .codex_policy import Policy, decision_lock, load_policies
 
 COOLDOWN_S = 300.0
 MARGIN_PCT = 10.0
@@ -49,10 +49,21 @@ class Decision:
     reason: str
     source: str | None = None
     target: str | None = None
+    assessments: tuple[Assessment, ...] = ()
 
     @property
     def exit_code(self) -> int:
         return {"switch": SWITCHED, "no-switch": NOTHING, "blocked": BLOCKED}.get(self.kind, ERROR)
+
+
+@dataclass(frozen=True)
+class Assessment:
+    account: str
+    priority: int
+    held: bool
+    room: float | None
+    remaining: float | None
+    result: str
 
 
 def _weekly(window: QuotaWindow) -> bool:
@@ -87,38 +98,68 @@ def left(row: ProviderAccountQuota) -> float | None:
 
 
 def decide(rows: list[ProviderAccountQuota], threshold: float = 90, weekly_threshold: float | None = None,
-           *, margin: float = MARGIN_PCT) -> Decision:
+           *, margin: float = MARGIN_PCT, policies: dict[str, Policy] | None = None) -> Decision:
     weekly_threshold = threshold if weekly_threshold is None else weekly_threshold
     if not all(math.isfinite(line) and 0 <= line <= 100 for line in (threshold, weekly_threshold)):
         return Decision("error", "Thresholds must be between 0 and 100 percent")
     active = next((r for r in rows if r.active), None)
     if active is None:
         return Decision("error", "no active Codex login")
+    policies = policies or {}
+
+    def policy(row: ProviderAccountQuota) -> Policy:
+        return policies.get(row.login_ref or "", Policy())
+
     active_room = room(active, threshold, weekly_threshold)
+    assessments = []
+    for row in rows:
+        account_policy = policy(row)
+        headroom = room(row, threshold, weekly_threshold)
+        if row.active:
+            result = "active"
+        elif account_policy.held:
+            result = "held"
+        elif not row.switchable or row.status != "ok" or headroom is None:
+            result = "quota unavailable"
+        elif headroom <= 0:
+            result = "at or over line"
+        elif active_room is not None and headroom - active_room < margin:
+            result = "insufficient improvement"
+        else:
+            result = "eligible"
+        assessments.append(Assessment(row.account, account_policy.priority, account_policy.held,
+                                      headroom, left(row), result))
+
+    def decision(kind: str, reason: str, target: str | None = None) -> Decision:
+        assessed = tuple(replace(item, result="selected") if target is not None and item.account == target
+                         else item for item in assessments)
+        return Decision(kind, reason, active.account, target, assessed)
+
     if active.status != "ok" or active_room is None:
-        return Decision("no-switch", f"{active.account}: usage unknown ({active.error or active.status})", active.account)
+        return decision("no-switch", f"{active.account}: usage unknown ({active.error or active.status})")
     if active_room > 0:
-        return Decision("no-switch", f"{active.account} under its lines ({active_room:.0f} points left)", active.account)
+        return decision("no-switch", f"{active.account} under its lines ({active_room:.0f} points left)")
     candidates = [r for r in rows if not r.active and r.switchable and r.status == "ok"
-                  and room(r, threshold, weekly_threshold) is not None]
+                  and not policy(r).held and room(r, threshold, weekly_threshold) is not None]
     if not candidates:
-        return Decision("blocked", f"{active.account} reached its line and no other saved login has a reading",
-                        active.account)
+        return decision("blocked", f"{active.account} reached its line and no saved login is eligible")
     under = [r for r in candidates if room(r, threshold, weekly_threshold) > 0
              and room(r, threshold, weekly_threshold) - active_room >= margin]
     if under:
-        best = max(under, key=lambda r: (room(r, threshold, weekly_threshold), left(r) or 0))
-        return Decision("switch", f"{active.account} reached its line; {best.account} has "
-                        f"{room(best, threshold, weekly_threshold):.0f} points before its lines",
-                        active.account, best.account)
+        best = max(under, key=lambda r: (policy(r).priority, room(r, threshold, weekly_threshold), left(r) or 0))
+        return decision("switch", f"{active.account} reached its line; {best.account} has "
+                        f"{room(best, threshold, weekly_threshold):.0f} points before its lines "
+                        f"(priority {policy(best).priority})", best.account)
     if any(room(r, threshold, weekly_threshold) > 0 for r in candidates):
-        return Decision("blocked", "No login below its lines has enough additional room", active.account)
-    best = max(candidates, key=lambda r: left(r) or 0)
-    now_left, best_left = left(active) or 0, left(best) or 0
-    if best_left >= min(2 * now_left, now_left + 3) and best_left > now_left:
-        return Decision("switch", f"every login is over its lines; {best.account} has the most left "
-                        f"({best_left:.0f}% vs {now_left:.0f}%)", active.account, best.account)
-    return Decision("blocked", "every login is over its lines and none has meaningfully more left", active.account)
+        return decision("blocked", "No login below its lines has enough additional room")
+    now_left = left(active) or 0
+    rescue = [r for r in candidates if (left(r) or 0) > now_left
+              and (left(r) or 0) >= min(2 * now_left, now_left + 3)]
+    if rescue:
+        best = max(rescue, key=lambda r: (policy(r).priority, left(r) or 0))
+        return decision("switch", f"{best.account} has more quota left "
+                        f"({left(best):.0f}% vs {now_left:.0f}%, priority {policy(best).priority})", best.account)
+    return decision("blocked", "every login is over its lines and none has meaningfully more left")
 
 
 def _state_path(root: Path) -> Path:
@@ -147,30 +188,35 @@ def record_switch(root: Path | None = None, at: float | None = None) -> None:
 def tick(*, threshold: float = 90, weekly_threshold: float | None = None, dry_run: bool = False,
          cooldown: float = COOLDOWN_S, root: Path | None = None) -> Decision:
     """One check: read fresh quota, decide, and switch unless cooling down or dry-run."""
-    from .codex import CodexAccounts, codex_quota
+    from .codex import CodexAccounts
     from .quota import collect_quota, invalidate_quota
 
     root = home() if root is None else root
     store = CodexAccounts(root)
-    roster, _ = store.roster()
-    if dry_run:
-        rows = [codex_quota(account, store, refresh_login=False) for account in roster]
-    else:
-        rows = collect_quota(("codex",), refresh=True, root=root)
-    decision = decide(rows, threshold, weekly_threshold)
+    roster, error = store.roster()
+    accounts = {(account.label, account.login.identity, account.active) for account in roster}
+    rows = collect_quota(("codex",), root=root, refresh_login=not dry_run, codex_accounts=(roster, error))
+    rows = [r for r in rows if (r.account, r.login_ref, r.active) in accounts]
+    policies = load_policies(root)
+    decision = decide(rows, threshold, weekly_threshold, policies=policies)
     if decision.kind != "switch":
         return decision
+    since = time.time() - last_switch(root)
+    if since < cooldown:
+        return replace(decision, kind="no-switch", target=None,
+                       reason=f"cooling down after a switch ({cooldown - since:.0f}s left)")
     if dry_run:
-        return Decision("no-switch", f"dry-run: would switch to {decision.target}; " + decision.reason,
-                        decision.source, decision.target)
+        return replace(decision, kind="no-switch", reason=f"dry-run: would switch to {decision.target}. " + decision.reason)
     source = next((account for account in roster if account.active and account.label == decision.source), None)
     target = next((account for account in roster if not account.active and account.label == decision.target), None)
     if source is None or target is None:
         return Decision("blocked", "Codex logins changed during the quota check", decision.source)
-    with FileLock(_state_path(root).with_suffix(".lock")):
+    with decision_lock(root):
         since = time.time() - last_switch(root)
         if since < cooldown:
             return Decision("no-switch", f"cooling down after a switch ({cooldown - since:.0f}s left)", decision.source)
+        if load_policies(root) != policies:
+            return replace(decision, kind="blocked", target=None, reason="Codex account policies changed")
         store.switch(target.label, expected_identity=target.login.identity, expected_active=source.login.identity)
         record_switch(root)
     invalidate_quota("codex", root)

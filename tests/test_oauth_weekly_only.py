@@ -51,7 +51,7 @@ def fetch_outcome(monkeypatch):
         response.__enter__.return_value = response
 
         def urlopen(request, timeout):
-            assert request.full_url == "https://api.anthropic.com/api/oauth/usage"
+            assert request.full_url == "https://api.anthropic.com/api/oauth/usage?cedar_ember=1"
             if error is not None:
                 raise error
             return response

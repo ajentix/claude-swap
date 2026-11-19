@@ -503,7 +503,9 @@ def fresh_reset_strings(window: dict) -> tuple[str, str] | None:
 
 def request_usage_data(access_token: str) -> dict:
     """Request raw utilization data from the Anthropic usage API."""
-    url = "https://api.anthropic.com/api/oauth/usage"
+    from claude_swap.providers.reset_credits import CLAUDE_USAGE_URL
+
+    url = CLAUDE_USAGE_URL
     headers = {
         "Authorization": f"Bearer {access_token}",
         "anthropic-beta": OAUTH_BETA_HEADER,
@@ -1070,7 +1072,9 @@ def build_usage_result(data: dict) -> dict | None:
     the whole fetch as ``bad-response`` (a refused header probe keeps its
     rejection instead, see :func:`_usage_from_probe`).
     """
-    _logger.debug("Usage API response: %s", json.dumps(data, indent=2))
+    _logger.debug("Usage API fields received: %s", ", ".join(
+        field for field in ("five_hour", "seven_day", "extra_usage", "limits", "cedar_ember") if field in data
+    ))
 
     result = {}
 
@@ -1131,6 +1135,14 @@ def build_usage_result(data: dict) -> dict | None:
         if scoped:
             result["scoped"] = scoped
 
+    if result and "cedar_ember" in data:
+        from dataclasses import asdict
+
+        from claude_swap.providers.reset_credits import claude_reset_inventory
+
+        credits, _ = claude_reset_inventory(data)
+        if credits is not None:
+            result["reset_credits"] = asdict(credits)
     return result if result else None
 
 

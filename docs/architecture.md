@@ -74,6 +74,8 @@ Every surface gets usage from one function, `_collect_usage_entries` in `switche
 
 A caller only nominates accounts. Whether a request is actually sent is decided in one place, `UsageStore.reserve`, which checks freshness, backoff, another process's claim and the stored poll plan under the store lock, then hands out a lease. This is why a dashboard that repaints every few seconds sends no more requests than one `cswap list`.
 
+Multi-provider Watch, quota, and Codex auto-switch use `providers.quota.collect_quota`. Its provider claims and retry deadlines live in `~/.cswap/quota_cache.json`. The Claude adapter reads the native store to reuse recent usage-endpoint readings and account backoff. The native Claude collector retains its configured probe and login policies.
+
 The fetch runs with no store lock held. `UsageStore.record` then merges the result: a success replaces the last good reading and stores the next poll time from `poll_policy.py`; a failure only updates the backoff fields, so the last good reading keeps being shown.
 
 Read next: the module docstrings of `usage_store.py`, `poll_policy.py` and `snapshot_source.py`.

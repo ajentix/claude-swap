@@ -48,6 +48,59 @@ def test_claude_inventory_counts_held_credits_separately_from_eligibility():
     assert reset_credits.claude_reset_inventory({}) == (None, None)
 
 
+def test_claude_distinguishes_fable_from_full_reset():
+    raw = claude_usage()
+    first, second, _ = raw["cedar_ember"]["grants"]
+    first["clears"] = ["seven_day_fable"]
+    second.update(clears=["all"], usable_now=True)
+    credits, offers = reset_credits.claude_reset_offers(raw)
+    assert credits.available_count == 3
+    assert [(offer.windows, offer.usable) for offer in offers] == [
+        (("Fable 7d",), True), (("All usage limits",), False),
+    ]
+
+
+def test_zai_redeems_and_retries_the_exact_window_and_pack(monkeypatch, tmp_path):
+    (tmp_path / "providers.toml").write_text('[zai-glm.personal]\napi_key = "synthetic-zai-key"\n')
+    raw = {"success": True, "code": 200, "data": {
+        "targetType": "PERSONAL", "customerId": 123,
+        "fiveHourResets": [{"recordId": 456, "grantType": "GLOBAL", "available": True,
+                           "expireTime": "2099-12-01 12:30:00"}],
+        "weekResets": [{"recordId": 789, "grantType": "DIRECT", "available": True,
+                       "expireTime": "2099-12-01 11:30:00"}],
+    }}
+    posts = []
+
+    def get(url, headers):
+        assert url == reset_credits.ZAI_CREDITS_URL
+        assert headers["Authorization"] == "Bearer synthetic-zai-key"
+        return raw
+
+    def post(url, headers, payload):
+        assert url == reset_credits.ZAI_CREDIT_BASE + "/use"
+        assert headers["Authorization"] == "Bearer synthetic-zai-key"
+        posts.append(payload)
+        if len(posts) == 1:
+            raise common.ProviderError("timeout")
+        return {"success": True, "code": 200}
+
+    monkeypatch.setattr(reset, "get_usage", get)
+    monkeypatch.setattr(reset, "post_reset", post)
+    options = reset.reset_options("zai-glm", "personal", root=tmp_path)
+    assert options.credits.by_scope == {"5h": 1, "7d": 1}
+    assert options.offers[0].expires_at == "2099-12-01T03:30:00+00:00"
+    assert not posts
+    assert reset.redeem_reset(options.choose(2), root=tmp_path) == "unknown"
+    pending = reset.reset_options("zai-glm", "personal", root=tmp_path)
+    assert pending.pending_state == "unknown"
+    assert pending.pending.offer.windows == ("5h",)
+    assert reset.redeem_reset(pending.pending, root=tmp_path) == "reset"
+    assert posts[0] == posts[1]
+    assert {k: v for k, v in posts[0].items() if k != "requestId"} == {
+        "recordId": 456, "targetType": "PERSONAL", "resetType": "FIVE_HOUR", "grantType": "GLOBAL",
+    }
+
+
 def test_codex_counts_without_details_and_picks_earliest_expiration():
     credits, offer = reset_credits.codex_reset_inventory({"available_count": 2})
     assert credits.available_count == 2 and offer is None

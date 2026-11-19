@@ -7,23 +7,40 @@ cswap quota --provider agy --provider codex --json --refresh
 
 The table shows remaining quota, the active login (`*`), and reset times in KST. JSON has `schemaVersion` and an `accounts` array. Each row includes `provider`, `account`, `number`, `active`, `switchable`, `plan`, `windows`, `status` and `error`. Windows include `name`, `remaining_pct`, UTC `resets_at` and `disabled`. Missing values are `null`. `cswap list --json` still uses the Claude list schema.
 
-Quota results are cached per provider for 60 seconds in `~/.cswap/quota_cache.json`. Use `--refresh` for a measurement now. Requests go to subscription usage endpoints or the Antigravity `/usage` command. They never send a prompt. Claude plan names come from the existing subscription store, when available. A failed Claude fetch can show a previous reading marked `stale`.
+Watch, quota, and Codex auto-switch share provider readings for 60 seconds in `~/.cswap/quota_cache.json`. `--refresh` requests a fresh reading when no other collector holds the provider's claim and no `Retry-After` is active. Each account retains its own measurement time. The table shows read and retry times in KST. JSON adds Unix times `fetched_at` and `retry_at`, and the upstream `http_status` when available. Claude quota also reuses recent usage-endpoint readings and account backoff from the native Claude store. The direct quota collector calls usage endpoints or Antigravity's `/usage` command.
+
+## Login diagnostics
+
+```sh
+cswap doctor
+cswap doctor --provider codex --provider opencode-go --live --json
+```
+
+Without `--live`, doctor reads local credentials and reports their source, known expiry, configuration problems, and sign-in steps. `--live` also checks subscription access using usage endpoints and Antigravity's isolated `/usage` command. API-key Codex logins and inference-only Claude setup tokens have no subscription usage API access.
 
 ## Reset credits
 
-Claude and ChatGPT Codex subscription accounts show a **Reset credits** row when the provider reports a balance. The time in that row is the next credit expiration in KST. Claude can report banked credits before they are usable. A missing balance appears as `reset_credits: null` in quota JSON.
+Claude, ChatGPT Codex, and z.ai GLM subscriptions show a **Reset credits** row when the provider reports a balance. The time in that row is the next credit expiration in KST. A missing balance appears as `reset_credits: null` in quota JSON. Kimi Coding and OpenCode Go show the renewal times reported by their usage endpoints.
 
 ```sh
 cswap quota --provider claude --provider codex --refresh
+cswap reset claude 2 --list
 cswap reset claude 2
-cswap reset codex personal
+cswap reset codex personal --list --json
+cswap reset codex personal --credit 2
+cswap reset zai-glm CodexBar --list
+cswap reset zai-glm CodexBar --credit 1
 ```
 
-In the TUI, open **All Providers Quota**, select an account and press `x`. Review the account shown in the confirmation dialog. For scripts, use `--yes` to explicitly confirm and `--json` for the provider's outcome. A reset uses one credit on the selected account. It neither switches logins nor purchases credits.
+In the TUI, open **All Providers Quota**, select an account and press `x`. Choose a credit and review the account and affected limits on the confirmation screen. The list distinguishes available credits, held credits, and a previous request that can be retried. For scripts, `--yes` confirms the selected credit and `--json` prints the outcome. CLI credit numbers refer to the live order shown by `--list`.
 
-After a reset, the provider's quota cache is invalidated. If the outcome is unknown, check the provider's quota. To retry within 24 hours, repeat the same command with `--retry`. `cswap` keeps the exact credit and request ID for that retry. It stores pending requests locally in `~/.cswap/reset_requests/` and removes the credit identifier when the outcome is settled.
+- **Claude** shows the windows the grant clears, such as Fable, account-wide windows, or an explicitly all-limits grant. Claude chooses which grant is eligible next and may require reaching a limit or waiting out a cooldown.
+- **Codex** shows each available credit and its expiration. With no explicit choice, it picks the earliest available expiration.
+- **z.ai GLM** shows separate 5-hour and weekly counts for personal plans. Each use request targets exactly one pack and the limit designated by the provider.
 
-Protocol references include [OpenAI Codex's reset client](https://github.com/openai/codex/blob/main/codex-rs/backend-client/src/client/rate_limit_resets.rs), [Claude reset usage and redemption in Sub2API](https://github.com/Wei-Shaw/sub2api/blob/main/backend/internal/service/claude_reset_redeem.go), [Juicebar's confirmed redemption](https://github.com/Rasalas/juicebar/pull/21) and [OpenCodex's retry fix](https://github.com/lidge-jun/opencodex/pull/3919).
+After a reset, the provider's quota cache is invalidated. If the outcome is unknown, inspect the request in the TUI or with `--list`. For 24 hours, the TUI and `--retry` resend the same credit and request ID. Pending records live in `~/.cswap/reset_requests/`. The credit identifier is removed when the outcome is settled.
+
+Protocol references include [OpenAI Codex's reset client](https://github.com/openai/codex/blob/main/codex-rs/backend-client/src/client/rate_limit_resets.rs), [Claude redemption in Sub2API](https://github.com/Wei-Shaw/sub2api/blob/main/backend/internal/service/claude_reset_redeem.go), [z.ai pack operations in MaxPool](https://github.com/2solarmax/maxpool/blob/HEAD/src/zai-reset-cards.js), and [OpenCodex's retry fix](https://github.com/lidge-jun/opencodex/pull/3919).
 
 ## Local accounts
 
@@ -53,10 +70,14 @@ cswap codex auto                        # check every 60s, switch before a limit
 cswap codex auto --threshold 85         # 5-hour line
 cswap codex auto --weekly-threshold 97  # weekly line (default: the same)
 cswap codex auto --once --json          # one check for a scheduler; exit 0 switched, 1 error, 2 nothing, 3 blocked
-cswap codex auto --dry-run
+cswap codex auto --once --dry-run --json
+cswap codex policy                      # list each login's priority and hold
+cswap codex policy personal --priority 5
+cswap codex policy personal --hold
+cswap codex policy personal --release
 ```
 
-It follows `cswap auto`'s `best` rules: the active login leaves when a window reaches its line and lands on the saved login with the most room under every line, at least 10 points of it; when every login is over its lines it moves only to one with clearly more left. A 5-minute cooldown follows each switch. Running Codex sessions keep their login, new ones start on the new login, and a session running across the switch cannot undo it.
+An account on hold is excluded from automatic selection and can still be selected manually. Higher priority wins among accounts eligible under the threshold and improvement rules. Ties use remaining quota. Defaults are priority 0 and no hold. Policy follows the login when its label or slot changes. Dry-run shows each account's status, priority, headroom, and the selected account. A five-minute cooldown follows each automatic switch.
 
 `switch` saves the outgoing login before installing the selected one. `run` launches the CLI with a temporary profile and passes it the arguments after `--`. The user chooses the CLI action executed by `run`. Stashed files contain credentials and should be kept private. In the Textual quota screen, use `r` to refresh, arrows and Enter to switch, or the displayed number keys for the first nine inactive switchable accounts.
 

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime
 
 from claude_swap import oauth, subscription
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 from .api import get_usage
-from .common import ProviderAccountQuota, ProviderError, display_text, object_dict, objects, window
+from .common import ProviderAccountQuota, ProviderError, ResetCredits, display_text, object_dict, objects, window
 from .reset_credits import CLAUDE_USAGE_URL, claude_reset_inventory
 
 
@@ -35,7 +36,8 @@ def _windows(data: dict, *, stored: bool, secrets: tuple[str, ...]) -> tuple:
     return tuple(windows)
 
 
-def _claude_row(row: ProviderAccountQuota, credentials: str, previous: dict) -> ProviderAccountQuota:
+def _claude_row(row: ProviderAccountQuota, credentials: str, previous: dict,
+                previous_at: float | None = None) -> ProviderAccountQuota:
     blob = oauth.extract_oauth_data(credentials) or {}
     token = blob.get("accessToken")
     secrets = tuple(s for s in (token, blob.get("refreshToken")) if isinstance(s, str) and s)
@@ -52,10 +54,37 @@ def _claude_row(row: ProviderAccountQuota, credentials: str, previous: dict) -> 
         stale = ()
         if previous.get("source") != oauth.USAGE_SOURCE_HEADERS:
             stale = _windows(previous, stored=True, secrets=secrets)
-        return replace(row, windows=stale, status="stale" if stale else "error", error=str(exc))
+        return replace(row, windows=stale, status="stale" if stale else "error", error=str(exc),
+                       fetched_at=previous_at if stale else None, retry_at=exc.retry_after, http_status=exc.status_code)
 
 
-def claude_jobs(switcher: ClaudeAccountSwitcher) -> list[Callable[[], ProviderAccountQuota]]:
+def _usage_store_row(row: ProviderAccountQuota, creds: str, entry, now: float, *,
+                     refresh: bool = False) -> ProviderAccountQuota:
+    previous = entry.last_good or {}
+    previous_at = entry.fetched_at
+    usable = previous.get("source") != oauth.USAGE_SOURCE_HEADERS
+    waiting = entry.backoff_until is not None and entry.backoff_until > now
+    pending = entry.claim_until is not None and entry.claim_until > now
+    # Read a native snapshot before sending a second request for the same account.
+    # Header probes remain native-only. Their backoff still applies here.
+    native_fresh = (usable and previous_at is not None
+                    and 0 <= now - previous_at < 60 and not refresh and not entry.last_error)
+    if waiting or pending or native_fresh:
+        blob = oauth.extract_oauth_data(creds) or {}
+        secrets = tuple(s for s in (blob.get("accessToken"), blob.get("refreshToken")) if isinstance(s, str) and s)
+        windows = _windows(previous, stored=True, secrets=secrets) if usable else ()
+        credit_data = previous.get("reset_credits")
+        credits = ResetCredits(**credit_data) if isinstance(credit_data, dict) else None
+        if credits and credits.next_expiry and datetime.fromisoformat(credits.next_expiry).timestamp() <= now:
+            credits = None
+        status = "ok" if native_fresh else "stale" if windows else "backoff" if waiting else "pending"
+        error = ("Claude usage is in backoff" if waiting else "Claude usage refresh is in progress" if pending else None)
+        return replace(row, windows=windows, reset_credits=credits, status=status, error=error,
+                       fetched_at=previous_at if windows else None, retry_at=entry.backoff_until if waiting else None)
+    return _claude_row(row, creds, previous, previous_at)
+
+
+def claude_jobs(switcher: ClaudeAccountSwitcher, *, refresh: bool = False) -> list[Callable[[], ProviderAccountQuota]]:
     accounts = switcher._build_accounts_info()
     plans = switcher._stored_subscription_plans(accounts)
     entries = switcher._usage_store.entries({str(n): (email, org) for n, email, _, org, *_ in accounts})
@@ -70,5 +99,7 @@ def claude_jobs(switcher: ClaudeAccountSwitcher) -> list[Callable[[], ProviderAc
             "claude", display_text(label, *secrets) or "account", number, active,
             switcher._account_is_switchable(number), display_text(subscription.plan_label(plan), *secrets),
         )
-        jobs.append(lambda row=row, creds=credentials, prior=entries[number].last_good or {}: _claude_row(row, creds, prior))
+        entry = entries[number]
+        jobs.append(lambda row=row, creds=credentials, entry=entry:
+                    _usage_store_row(row, creds, entry, switcher._usage_store.clock(), refresh=refresh))
     return jobs

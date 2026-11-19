@@ -203,7 +203,8 @@ def _parse(source: Source, rows: list, fetched_at: float | None) -> list[Externa
             switchable=(bool(source.switch_cmd) or (bool(source.providers) and row.get("switchable") is True))
             and row["account"] != "-",
             product=str(row.get("product") or ""),
-            fetched_at=fetched_at,
+            fetched_at=(_positive(row.get("fetched_at"), 0) or None)
+            if source.providers or "fetched_at" in row else fetched_at,
         ))
     return accounts
 
@@ -302,12 +303,12 @@ def _finish(source: Source, claim: str, rows: list, error: str) -> None:
             return
         now = time.time()
         if not error:
-            entry.update(at=now, rows=_keep_last_windows(entry.get("rows"), rows))
+            entry.update(at=now, rows=_keep_last_windows(entry.get("rows"), rows, entry.get("at")))
         entry.update(attempted_at=now, claimed_at=0, claim=None, error=error)
         _write_store(data, source.name, entry)
 
 
-def _keep_last_windows(previous: object, rows: list) -> list:
+def _keep_last_windows(previous: object, rows: list, previous_at: float | None = None) -> list:
     """An account read without windows (skipped for low memory, a failed call)
     keeps the bars of its last reading, with this read's reason under them."""
     last = {r.get("account"): r for r in previous if isinstance(r, dict)} if isinstance(previous, list) else {}
@@ -315,7 +316,8 @@ def _keep_last_windows(previous: object, rows: list) -> list:
     for row in rows:
         old = last.get(row.get("account")) if isinstance(row, dict) else None
         if isinstance(row, dict) and not row.get("windows") and isinstance(old, dict) and old.get("windows"):
-            row = {**row, "windows": old["windows"], "plan": row.get("plan") or old.get("plan"),
+            row = {**row, "windows": old["windows"], "fetched_at": old.get("fetched_at", previous_at),
+                   "plan": row.get("plan") or old.get("plan"),
                    "error": f"{row.get('error') or 'not read'}; showing the last reading"}
         kept.append(row)
     return kept
@@ -439,13 +441,18 @@ def _builtin_rows(source: Source, force: bool) -> list[dict]:
         credits = row.reset_credits
         if credits and credits.available_count:
             note = f"{credits.available_count} reset credit{'s' if credits.available_count != 1 else ''}"
+        error = row.error or ""
+        if row.retry_at and row.retry_at > time.time():
+            retry = datetime.fromtimestamp(row.retry_at, timezone.utc).astimezone()
+            error = f"{error} / Retry {retry:%m-%d %H:%M}".strip(" /")
         rows.append({
             "account": account,
             "product": product or source.label,
             "active": row.active,
             "plan": row.plan,
             "note": note,
-            "error": row.error or "",
+            "error": error,
+            "fetched_at": row.fetched_at,
             "switchable": bool(row.switchable),
             "windows": [{
                 "name": " ".join(x for x in (product, w.name.replace("Claude and GPT", "Claude")) if x),

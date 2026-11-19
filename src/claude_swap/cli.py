@@ -1439,6 +1439,10 @@ def main() -> None:
     force_utf8_output()
     _use_native_tls()
     argv = sys.argv[1:]
+    if argv and argv[0] == "doctor":
+        from claude_swap.providers.doctor import doctor_command
+
+        sys.exit(doctor_command(argv[1:], _prog_name()))
     if argv and argv[0] == "plan":
         from claude_swap.external import plan_command
 
@@ -1518,6 +1522,7 @@ def main() -> None:
 Commands:
   %(prog)s help                       show this help
   %(prog)s quota                      show quotas across providers
+  %(prog)s doctor                     diagnose provider logins and quota access
   %(prog)s plan <source> <account> <name>  name a plan the provider does not report
   %(prog)s reset <provider> <account> use one subscription reset credit
   %(prog)s agy <command>              manage Antigravity logins

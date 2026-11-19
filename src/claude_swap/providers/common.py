@@ -10,7 +10,7 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -22,6 +22,12 @@ WINDOWS_NO_WINDOW = 0x08000000
 
 class ProviderError(Exception):
     """An operator-facing message that contains no raw upstream output."""
+
+    def __init__(self, message: str, *, status_code: int | None = None,
+                 retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True)
@@ -38,6 +44,7 @@ class ResetCredits:
     next_expiry: str | None = None
     redeemable_count: int | None = None
     cooldown_until: str | None = None
+    by_scope: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,10 @@ class ProviderAccountQuota:
     status: str = "ok"
     error: str | None = None
     reset_credits: ResetCredits | None = None
+    fetched_at: float | None = None
+    retry_at: float | None = None
+    http_status: int | None = None
+    login_ref: str | None = field(default=None, repr=False)
 
 
 def home() -> Path:
@@ -160,7 +171,19 @@ def reset_credit_cells(credits: ResetCredits, now: datetime) -> tuple[str, str, 
         reason = f"Cooldown until {reset_clock(credits.cooldown_until, now)}"
     elif credits.available_count and credits.redeemable_count == 0:
         reason = "Not usable yet"
-    return f"{credits.available_count} left", reset_clock(credits.next_expiry, now), reason
+    remaining = f"{credits.available_count} left"
+    if credits.by_scope:
+        remaining = ", ".join(f"{scope} {amount}" for scope, amount in credits.by_scope.items())
+    return remaining, reset_clock(credits.next_expiry, now), reason
+
+
+def quota_status(row: ProviderAccountQuota, now: datetime) -> str:
+    notes = [f"{row.status}: {row.error}" if row.error else row.status]
+    if row.fetched_at is not None:
+        notes.append(f"Read {reset_clock(timestamp(row.fetched_at), now)}")
+    if row.retry_at is not None and row.retry_at > now.timestamp():
+        notes.append(f"Retry {reset_clock(timestamp(row.retry_at), now)}")
+    return " / ".join(notes)
 
 
 def process_options() -> dict:

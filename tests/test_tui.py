@@ -961,7 +961,7 @@ class TestDashboard:
         from textual.widgets import DataTable
 
         from claude_swap.providers.common import ProviderAccountQuota, ResetCredits
-        from claude_swap.providers.reset import ResetIntent, ResetOffer, ResetTarget
+        from claude_swap.providers.reset import ResetIntent, ResetOffer, ResetOptions, ResetTarget
         from claude_swap.tui import quota
         from claude_swap.tui.modals import ConfirmModal
 
@@ -969,15 +969,19 @@ class TestDashboard:
         app = make_app(fake)
         calls = []
         row = ProviderAccountQuota("codex", "personal", "1", reset_credits=ResetCredits(1))
-        intent = ResetIntent(ResetTarget("codex", "1", "personal", "id", "work", {}), ResetOffer("opaque-id"), 0)
+        target = ResetTarget("codex", "1", "personal", "id", "work", {})
+        chosen = ResetOffer("opaque-2", windows=("Codex usage limits",))
+        offers = (ResetOffer("opaque-1", usable=False), chosen)
+        options = ResetOptions(target, 0, ResetCredits(2), offers)
+        intent = ResetIntent(target, chosen, 0)
 
         def redeem(pending, *, switcher):
-            assert pending is intent and switcher is fake
+            assert pending == intent and switcher is fake
             calls.append(pending)
             return "reset"
 
         monkeypatch.setattr(quota, "collect_quota", lambda **_: [row])
-        monkeypatch.setattr(quota, "prepare_reset", lambda *_, **__: intent)
+        monkeypatch.setattr(quota, "reset_options", lambda *_, **__: options)
         monkeypatch.setattr(quota, "redeem_reset", redeem)
         async with app.run_test(size=(100, 32)) as pilot:
             await settle(pilot)
@@ -987,15 +991,49 @@ class TestDashboard:
             await pilot.press("x")
             await app.workers.wait_for_complete()
             await pilot.pause()
+            assert isinstance(app.screen, quota.ResetCreditsScreen)
+            await pilot.press("enter")
+            assert isinstance(app.screen, quota.ResetCreditsScreen)
+            await pilot.press("down", "enter")
             assert isinstance(app.screen, ConfirmModal)
             assert app.screen.focused.id == "no"
             await pilot.press("enter")
             assert not calls
             await pilot.press("x")
             await app.workers.wait_for_complete()
+            await pilot.press("down", "enter")
             await pilot.press("y")
             await app.workers.wait_for_complete()
             assert calls == [intent]
+
+    async def test_quota_reset_retry_uses_previous_intent(self, tmp_path, monkeypatch):
+        from claude_swap.providers.common import ProviderAccountQuota
+        from claude_swap.providers.reset import ResetIntent, ResetOffer, ResetOptions, ResetTarget
+        from claude_swap.tui import quota
+
+        app = make_app(FakeSwitcher([make_account(1, active=True)], tmp_path))
+        target = ResetTarget("zai-glm", "personal", "personal", "id", "scope", {})
+        pending = ResetIntent(target, ResetOffer("opaque-id", windows=("7d",)), 0, "previous-request")
+        options = ResetOptions(target, 0, None, pending=pending, pending_state="unknown")
+        calls = []
+        monkeypatch.setattr(quota, "collect_quota", lambda **_: [ProviderAccountQuota("zai-glm", "personal")])
+        monkeypatch.setattr(quota, "reset_options", lambda *_, **__: options)
+
+        def redeem(intent, **_):
+            calls.append(intent)
+            return "reset"
+
+        monkeypatch.setattr(quota, "redeem_reset", redeem)
+        async with app.run_test(size=(92, 30)) as pilot:
+            await settle(pilot)
+            await pilot.press("p")
+            await app.workers.wait_for_complete()
+            await pilot.press("x")
+            await app.workers.wait_for_complete()
+            assert isinstance(app.screen, quota.ResetCreditsScreen)
+            await pilot.press("enter", "y")
+            await app.workers.wait_for_complete()
+            assert calls == [pending]
 
     async def test_remove_menu_shows_alias_before_email(self, tmp_path):
         fake = FakeSwitcher(

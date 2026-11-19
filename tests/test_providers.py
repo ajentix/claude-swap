@@ -213,6 +213,9 @@ def test_coding_plan_quota_parsing(monkeypatch, tmp_path, provider, response, wi
         if provider == "zai-glm" and url == api.ZAI_SUBSCRIPTIONS_URL:
             assert headers["Authorization"] == "test-key"
             return {"data": []}
+        if provider == "zai-glm" and url == api.ZAI_CREDITS_URL:
+            assert headers["Authorization"] == "Bearer test-key"
+            return {"code": 200, "success": True, "data": {"fiveHourResets": [], "weekResets": []}}
         assert url == api.CODING_ENDPOINTS[provider][0]
         assert headers["Authorization"] == ("test-key" if provider == "zai-glm" else "Bearer test-key")
         if provider == "opencode-go":
@@ -376,6 +379,38 @@ def test_quota_cache_filters_refreshes_and_invalidates_per_provider(monkeypatch,
     quota.invalidate_quota("codex", tmp_path)
     quota.collect_quota(("agy", "codex"), root=tmp_path)
     assert calls[2:] == ["agy", "codex"]
+
+
+def test_quota_cache_shared_between_readers_and_honors_retry_after(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    entered, release = Event(), Event()
+    calls = []
+    retry = time.time() + 600
+
+    def measure():
+        calls.append("read")
+        entered.set()
+        assert release.wait(5)
+        return common.ProviderAccountQuota("codex", "one", status="error", retry_at=retry, http_status=429)
+
+    monkeypatch.setattr(quota, "_jobs", lambda *_args, **_kwargs: [measure])
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(quota.collect_quota, ("codex",), refresh=True, root=tmp_path)
+        assert entered.wait(5)
+        second = quota.collect_quota(("codex",), refresh=True, root=tmp_path)
+        assert second[0].status == "pending"
+        release.set()
+        assert first.result(timeout=5)[0].http_status == 429
+    cached, = quota.collect_quota(("codex",), refresh=True, root=tmp_path)
+    assert cached.retry_at == retry and calls == ["read"]
+
+
+def test_http_retry_after_accepts_a_duration_and_a_date():
+    assert api.retry_at("14", now=1) == 15
+    assert api.retry_at("Thu, 01 Jan 1970 00:01:00 GMT", now=1) == 60
+    assert api.retry_at("inf", now=1) is None
 
 
 def test_reset_clock_uses_korea_date():

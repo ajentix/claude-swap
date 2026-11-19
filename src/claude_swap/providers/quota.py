@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import time
+import math
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from claude_swap.exceptions import LockError
@@ -20,11 +21,15 @@ from .common import ProviderAccountQuota, ProviderError, QuotaWindow, ResetCredi
 PROVIDERS = ("claude", "agy", "codex", *CODING_ENDPOINTS)
 SWITCHERS = {"agy": AgyAccounts, "codex": CodexAccounts}
 TTL = 60
+CLAIM_TTL = 180
 
 
 def quota_payload(rows: list[ProviderAccountQuota]) -> dict:
     # JSON arrays are intentional even though the immutable Python rows use tuples.
-    return {"schemaVersion": 1, "accounts": [asdict(row) for row in rows]}
+    accounts = [asdict(row) for row in rows]
+    for row in accounts:
+        row.pop("login_ref")
+    return {"schemaVersion": 1, "accounts": accounts}
 
 
 def _load_cache(path: Path) -> dict:
@@ -34,10 +39,8 @@ def _load_cache(path: Path) -> dict:
         return {}
 
 
-def _cached_rows(entry: dict, now: float) -> list[ProviderAccountQuota] | None:
+def _decode_rows(entry: dict) -> list[ProviderAccountQuota] | None:
     try:
-        if not 0 <= now - entry["fetched_at"] < TTL:
-            return None
         rows = []
         for raw in entry["rows"]:
             item = dict(raw)
@@ -48,6 +51,55 @@ def _cached_rows(entry: dict, now: float) -> list[ProviderAccountQuota] | None:
         return rows
     except (KeyError, ValueError, TypeError):
         return None
+
+
+def _deadline(entry: dict, name: str) -> float:
+    value = entry.get(name, 0)
+    return value if type(value) in (int, float) and math.isfinite(value) else 0
+
+
+def _matches_roster(rows: list[ProviderAccountQuota], codex_accounts) -> bool:
+    if codex_accounts is None:
+        return True
+    expected = {(a.label, a.login.identity, a.active) for a in codex_accounts[0]}
+    return {(r.account, r.login_ref, r.active) for r in rows if r.account != "-"} == expected
+
+
+def _claim(path: Path, names: tuple[str, ...], started: float, max_age: float,
+           refresh: bool, refresh_login: bool, codex_accounts) -> tuple[dict, list[str]]:
+    with FileLock(path.with_suffix(".lock"), timeout=2):
+        data = _load_cache(path)
+        rows, pending = {}, []
+        for name in names:
+            entry = object_dict(data.get(name))
+            view = _decode_rows(entry)
+            in_progress = _deadline(entry, "claim_until") > started
+            waiting = _deadline(entry, "retry_at") > started
+            fresh = _fresh(entry, name, view, started, max_age, refresh_login, codex_accounts)
+            if in_progress or waiting or (view is not None and fresh and not refresh):
+                if view is not None and not fresh:
+                    view = [replace(row, status="stale") if row.status == "ok" else row for row in view]
+                rows[name] = view if view is not None else [ProviderAccountQuota(
+                    name, "-", status="pending" if in_progress else "backoff",
+                    error="Quota refresh already in progress" if in_progress else "Provider asked to retry later",
+                    retry_at=entry.get("retry_at"),
+                )]
+                continue
+            data[name] = {**entry, "started_at": started, "claim_until": started + CLAIM_TTL}
+            pending.append(name)
+        if pending:
+            write_json(path, data)
+        return rows, pending
+
+
+def _fresh(entry: dict, name: str, rows: list[ProviderAccountQuota] | None, started: float,
+           max_age: float, refresh_login: bool, codex_accounts) -> bool:
+    if rows is None or not 0 <= started - _deadline(entry, "fetched_at") < max_age:
+        return False
+    if name == "codex":
+        return (_matches_roster(rows, codex_accounts)
+                and not (refresh_login and entry.get("probe_only")))
+    return True
 
 
 def _update_cache(path: Path, changes: dict) -> None:
@@ -65,22 +117,33 @@ def _update_cache(path: Path, changes: dict) -> None:
 
 def invalidate_quota(provider: str, root: Path | None = None) -> None:
     root = home() if root is None else root
-    _update_cache(root / "quota_cache.json", {provider: {"started_at": time.time()}})
+    path = root / "quota_cache.json"
+    try:
+        with FileLock(path.with_suffix(".lock"), timeout=2):
+            data = _load_cache(path)
+            previous = object_dict(data.get(provider))
+            data[provider] = {"started_at": time.time(), "retry_at": previous.get("retry_at")}
+            write_json(path, data)
+    except (OSError, LockError):
+        pass
 
 
-def _jobs(provider: str, root: Path, switcher=None) -> list[Callable[[], ProviderAccountQuota]]:
+def _jobs(provider: str, root: Path, switcher=None, *,
+          refresh_login: bool = True, codex_accounts=None,
+          refresh: bool = False) -> list[Callable[[], ProviderAccountQuota]]:
     if provider == "claude":
         if switcher is None:
             from claude_swap.switcher import ClaudeAccountSwitcher
 
             switcher = ClaudeAccountSwitcher()
-        return claude_jobs(switcher)
+        return claude_jobs(switcher, refresh=refresh)
     if provider in SWITCHERS:
         store = SWITCHERS[provider](root)
-        accounts, error = store.roster()
+        accounts, error = codex_accounts if provider == "codex" and codex_accounts is not None else store.roster()
         jobs = [
             (lambda account=account: agy_quota(store, account)) if provider == "agy"
-            else (lambda account=account: codex_quota(account, store)) for account in accounts
+            else (lambda account=account: codex_quota(account, store, refresh_login=refresh_login))
+            for account in accounts
         ]
         if error:
             jobs.append(lambda: ProviderAccountQuota(provider, "-", status="error", error=error))
@@ -90,29 +153,57 @@ def _jobs(provider: str, root: Path, switcher=None) -> list[Callable[[], Provide
 
 def _run_job(provider: str, job: Callable[[], ProviderAccountQuota]) -> ProviderAccountQuota:
     try:
-        return job()
+        row = job()
+        return replace(row, fetched_at=time.time()) if row.status == "ok" and row.fetched_at is None else row
     except ProviderError as exc:
-        return ProviderAccountQuota(provider, "-", status="error", error=str(exc))
+        return ProviderAccountQuota(provider, "-", status="error", error=str(exc),
+                                    retry_at=exc.retry_after, http_status=exc.status_code)
     except Exception:
         return ProviderAccountQuota(provider, "-", status="error", error="Quota lookup failed")
 
 
 def collect_quota(providers: Iterable[str] = PROVIDERS, *, refresh: bool = False,
-                  root: Path | None = None, switcher=None) -> list[ProviderAccountQuota]:
+                  root: Path | None = None, switcher=None, max_age: float = TTL,
+                  refresh_login: bool = True, codex_accounts=None) -> list[ProviderAccountQuota]:
     root = home() if root is None else root
     path = root / "quota_cache.json"
     names = tuple(dict.fromkeys(providers))
     started = time.time()
-    cache = {} if refresh else _load_cache(path)
-    rows = {name: _cached_rows(object_dict(cache.get(name)), started) for name in names}
-    pending = [name for name in names if rows[name] is None]
+    # Fresh cache hits take no lock and do not touch credential stores.
+    cache = _load_cache(path)
+    rows = {}
+    pending = []
+    for name in names:
+        entry = object_dict(cache.get(name))
+        cached = _decode_rows(entry) if not refresh else None
+        if not _fresh(entry, name, cached, started, max_age, refresh_login, codex_accounts):
+            cached = None
+        if cached is None:
+            pending.append(name)
+        else:
+            rows[name] = cached
+    if pending:
+        try:
+            existing, pending = _claim(path, tuple(pending), started, max_age, refresh, refresh_login, codex_accounts)
+            rows.update(existing)
+        except (OSError, LockError, ValueError):
+            for name in pending:
+                rows[name] = [ProviderAccountQuota(name, "-", status="error", error="Quota cache unavailable")]
+            pending = []
     if pending:
         with (
             ThreadPoolExecutor(max_workers=len(pending)) as discovery,
             ThreadPoolExecutor(max_workers=8) as requests,
             ThreadPoolExecutor(max_workers=2) as agy_requests,
         ):
-            discovered = {discovery.submit(_jobs, name, root, switcher): name for name in pending}
+            options = {} if refresh_login and codex_accounts is None else {
+                "refresh_login": refresh_login, "codex_accounts": codex_accounts,
+            }
+            discovered = {
+                discovery.submit(_jobs, name, root, switcher, **options,
+                                 **({"refresh": refresh} if name == "claude" else {})): name
+                for name in pending
+            }
             # Submit each provider as soon as its roster is ready, even when another
             # provider is waiting for a Keychain prompt.
             tasks = {}
@@ -122,13 +213,19 @@ def collect_quota(providers: Iterable[str] = PROVIDERS, *, refresh: bool = False
                     pool = agy_requests if name == "agy" else requests
                     tasks[name] = [pool.submit(_run_job, name, job) for job in future.result()]
                 except ProviderError as exc:
-                    rows[name] = [ProviderAccountQuota(name, "-", status="error", error=str(exc))]
+                    rows[name] = [ProviderAccountQuota(name, "-", status="error", error=str(exc),
+                                                       retry_at=exc.retry_after, http_status=exc.status_code)]
                 except Exception:
                     rows[name] = [ProviderAccountQuota(name, "-", status="error", error="Cannot read provider accounts")]
             for name, futures in tasks.items():
                 rows[name] = [future.result() for future in futures]
-        _update_cache(path, {
-            name: {"started_at": started, "fetched_at": time.time(), "rows": quota_payload(rows[name])["accounts"]}
+        changes = {
+            name: {"started_at": started, "fetched_at": time.time(),
+                   "retry_at": max((row.retry_at or 0 for row in rows[name]), default=0),
+                   "probe_only": not refresh_login and name == "codex" and
+                   any(row.http_status == 401 for row in rows[name]),
+                   "rows": [asdict(row) for row in rows[name]]}
             for name in pending
-        })
+        }
+        _update_cache(path, changes)
     return [row for name in names for row in rows[name] or ()]

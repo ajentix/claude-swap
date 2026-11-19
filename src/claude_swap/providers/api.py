@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import time
 import tomllib
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .coding_credentials import local_coding_credential
 from .common import ProviderAccountQuota, ProviderError, display_text, object_dict, objects, window
+from .reset_credits import ZAI_CREDITS_URL, zai_reset_offers
 
 CODING_ENDPOINTS = {
     "kimi-coding": ("https://api.kimi.com/coding/v1/usages", ("KIMI_CODING_API_KEY", "KIMI_CODE_API_KEY")),
@@ -24,6 +29,22 @@ CODING_ENDPOINTS = {
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def retry_at(value: str | None, *, now: float | None = None) -> float | None:
+    if not value:
+        return None
+    now = time.time() if now is None else now
+    try:
+        when = now + float(value)
+    except ValueError:
+        try:
+            date = parsedate_to_datetime(value)
+            when = date.replace(tzinfo=date.tzinfo or timezone.utc).timestamp()
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
+    # Beyond the largest representable Unix date, the header is malformed.
+    return max(now, when) if math.isfinite(when) and when < 253402300800 else None
 
 
 def get_usage(url: str, headers: dict[str, str], *, timeout: float = 10) -> dict:
@@ -61,7 +82,10 @@ def _request_json(url: str, headers: dict[str, str], body: bytes | None = None, 
                         message = "OpenCode Go subscription required"
                 except (OSError, ValueError):
                     pass
-        raise ProviderError(f"HTTP {code}: {message}") from None
+        deadline = retry_at(exc.headers.get("Retry-After")) if exc.headers else None
+        if code == 429 and deadline is None:
+            deadline = time.time() + 60
+        raise ProviderError(f"HTTP {code}: {message}", status_code=code, retry_after=deadline) from None
     except (URLError, OSError, ValueError) as exc:
         message = "Invalid usage response" if isinstance(exc, ValueError) else "Usage endpoint unavailable"
         raise ProviderError(message) from None
@@ -132,7 +156,7 @@ def _credential(settings: dict, field: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def coding_plan_jobs(root: Path, provider: str) -> list[Callable[[], ProviderAccountQuota]]:
+def coding_plan_config(root: Path, provider: str) -> tuple[str, dict[str, dict], str | None]:
     url, env_names = CODING_ENDPOINTS[provider]
     try:
         with (root / "providers.toml").open("rb") as stream:
@@ -145,18 +169,27 @@ def coding_plan_jobs(root: Path, provider: str) -> list[Callable[[], ProviderAcc
     credentials = {label: value for label, value in section.items() if isinstance(value, dict)}
     if any(name in section for name in ("api_key", "api_key_env", "session", "session_env")):
         credentials["default"] = section
+    source = "providers.toml" if credentials else None
     if not credentials:
         env = next((name for name in env_names if os.environ.get(name, "").strip()), None)
         if env:
             credentials["default"] = {"api_key_env": env}
+            source = f"environment ({env})"
         else:
             key, label, local_url = local_coding_credential(provider, Path.home())
             if key:
                 credentials[label] = {"api_key": key}
                 url = local_url or url
+                source = label
+    return url, credentials, source
+
+
+def coding_plan_jobs(root: Path, provider: str) -> list[Callable[[], ProviderAccountQuota]]:
+    url, credentials, _ = coding_plan_config(root, provider)
     if not credentials:
         return [lambda: ProviderAccountQuota(
-            provider, "-", status="unconfigured", error=f"Set {env_names[0]} or configure a local login",
+            provider, "-", status="unconfigured",
+            error=f"Set {CODING_ENDPOINTS[provider][1][0]} or configure a local login",
         )]
     return [
         lambda label=label, settings=settings: _coding_plan_row(provider, label, url, settings)
@@ -176,16 +209,22 @@ def _coding_plan_row(provider: str, label: str, url: str, settings: dict) -> Pro
     if provider == "opencode-go" and session:
         headers["x-opencode-session"] = session
     try:
+        credits = None
         data = get_usage(url, headers)
         if provider == "kimi-coding":
             windows, plan = kimi_usage(data, key)
         elif provider == "zai-glm":
             windows, plan = zai_usage(data, key)
             plan = zai_plan_name(headers) or plan
+            try:
+                reset_data = get_usage(ZAI_CREDITS_URL, {"Authorization": f"Bearer {key}"})
+                credits, _ = zai_reset_offers(reset_data)
+            except ProviderError:
+                pass
         else:
             windows, plan = opencode_usage(data, key, session)
         if not any(item.remaining_pct is not None for item in windows):
             raise ProviderError("Usage API returned no quota windows")
-        return replace(row, windows=windows, plan=plan)
+        return replace(row, windows=windows, plan=plan, reset_credits=credits)
     except ProviderError as exc:
-        return replace(row, status="error", error=str(exc))
+        return replace(row, status="error", error=str(exc), retry_at=exc.retry_after, http_status=exc.status_code)

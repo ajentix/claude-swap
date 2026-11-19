@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from claude_swap.providers import codex_auto
+from claude_swap.providers.codex_policy import Policy, load_policies, set_policy
 from claude_swap.providers.common import ProviderAccountQuota, QuotaWindow
 
 
 def row(account, five, week, *, active=False, status="ok", disabled=False):
     windows = (QuotaWindow("5h", None if five is None else 100 - five, disabled=disabled),
                QuotaWindow("7d", None if week is None else 100 - week))
-    return ProviderAccountQuota("codex", account, None, active, True, windows=windows, status=status)
+    return ProviderAccountQuota("codex", account, None, active, True, windows=windows,
+                               status=status, login_ref=account)
 
 
 class TestDecide:
@@ -61,6 +64,21 @@ class TestDecide:
     def test_no_active_login_is_an_error(self):
         assert codex_auto.decide([row("b", 0, 0)]).exit_code == 1
 
+    def test_priority_and_hold_preserve_eligibility_rules(self, tmp_path):
+        rows = [row("active", 95, 30, active=True), row("best", 0, 0), row("preferred", 30, 30)]
+        set_policy(tmp_path, "preferred", priority=5)
+        policies = load_policies(tmp_path)
+        decision = codex_auto.decide(rows, policies=policies)
+        assert decision.target == "preferred"
+        assert [item.result for item in decision.assessments] == ["active", "eligible", "selected"]
+
+        set_policy(tmp_path, "preferred", held=True)
+        rows[-1] = replace(rows[-1], account="renamed")
+        decision = codex_auto.decide(rows, policies=load_policies(tmp_path))
+        assert decision.target == "best"
+        assert decision.assessments[-1].result == "held"
+        assert load_policies(tmp_path)["preferred"] == Policy(priority=5, held=True)
+
 
 class TestTick:
     @pytest.fixture
@@ -83,12 +101,13 @@ class TestTick:
                 switched.append(identifier)
                 return identifier
 
-        monkeypatch.setattr(quota, "collect_quota", lambda providers, refresh=False, root=None: rows)
+        def collect(providers, *, root, refresh_login, codex_accounts):
+            assert providers == ("codex",) and len(codex_accounts[0]) == len(rows)
+            return rows
+
+        monkeypatch.setattr(quota, "collect_quota", collect)
         monkeypatch.setattr(quota, "invalidate_quota", lambda provider, root=None: None)
         monkeypatch.setattr(codex, "CodexAccounts", Store)
-        monkeypatch.setattr(codex, "codex_quota",
-                            lambda account, _, refresh_login: next(r for r in rows if r.account == account.label)
-                            if not refresh_login else pytest.fail("dry-run refreshed a login"))
         return tmp_path, switched
 
     def test_switches_then_cools_down(self, env):
@@ -103,3 +122,4 @@ class TestTick:
         root, switched = env
         d = codex_auto.tick(root=root, dry_run=True)
         assert d.kind == "no-switch" and d.target == "b" and switched == []
+        assert d.assessments[-1].result == "selected"

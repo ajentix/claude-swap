@@ -1193,7 +1193,7 @@ class TestSetupTokenHeaderProbe:
     read from the rate-limit headers of a 1-token model request (opt-in)."""
 
     TOKEN = "sk-ant-oat01-secret-token"
-    USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+    USAGE_URL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1"
 
     def _creds(self) -> str:
         return json.dumps({"claudeAiOauth": {
