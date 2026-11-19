@@ -289,8 +289,6 @@ def account_card_text(
         text.append(badge, style=palette.muted)
     _append_plan(text, acc, "   ", palette, label_prefix.strip())
     credits = reset_credits or (acc.usage.last_good.get("reset_credits") if isinstance(acc.usage.last_good, dict) else None)
-    if isinstance(credits, dict):
-        text.append(f"   · {reset_credit_text(label_prefix.strip() or 'Claude', credits, now)}", style=palette.muted)
     age = data.format_age(acc.usage.age_s)
     if age:
         text.append(f"   {age}", style=palette.muted)
@@ -352,6 +350,9 @@ def account_card_text(
                 palette=palette,
             )
         )
+    if isinstance(credits, dict):
+        text.append(reset_row(label_prefix.strip() or "Claude", credits, max(label_width, len("Claude resets")),
+                              palette=palette))
     return text
 
 
@@ -618,7 +619,11 @@ class AccountItem(ListItem):
 
     def row_labels(self) -> list[str]:
         card = self.query_one(AccountCard)
-        return [label for label, *_ in usage_rows(card._acc.usage.last_good, time.time(), card._acc.usage.fetched_at)]
+        labels = [label for label, *_ in usage_rows(card._acc.usage.last_good, time.time(), card._acc.usage.fetched_at)]
+        if card._reset_credits or (isinstance(card._acc.usage.last_good, dict)
+                                   and isinstance(card._acc.usage.last_good.get("reset_credits"), dict)):
+            labels.append("resets")
+        return labels
 
 
 class MenuItem(ListItem):
@@ -671,7 +676,10 @@ def _row_label(prefix: str, window: "ExternalWindow") -> str:
 
 
 def ext_label_width(acc: "ExternalAccount", prefix: str) -> int:
-    return max((len(_row_label(prefix, w)) for w in acc.windows), default=0)
+    labels = [len(_row_label(prefix, w)) for w in acc.windows]
+    if acc.reset_credits is not None:
+        labels.append(len(f"{acc.product or prefix or acc.source} resets"))
+    return max(labels, default=0)
 
 
 def ext_rows(acc: "ExternalAccount", prefix: str, width: int, label_w: int, *, palette: Palette = Palette.DARK) -> Text:
@@ -688,6 +696,8 @@ def ext_rows(acc: "ExternalAccount", prefix: str, width: int, label_w: int, *, p
         else:
             text.append(usage_bar(label, w.used_pct, _ext_suffix(acc, w, width, label_w, bar_w) or None,
                                   bar_w, palette=palette))
+    if acc.reset_credits is not None:
+        text.append(reset_row(acc.product or prefix or acc.source, acc.reset_credits, label_w, palette=palette))
     if acc.error:
         text.append("\n    ")
         text.append(f"⚠ {acc.error}", style=palette.sev_warn)
@@ -695,6 +705,35 @@ def ext_rows(acc: "ExternalAccount", prefix: str, width: int, label_w: int, *, p
 
 
 NOT_STARTED = "not started"
+
+
+def reset_credit_detail(credits: dict, now: float | None = None) -> str:
+    """What a "resets" row says: ``7d 1 until Dec 11 07:00, Fable 3 until Mar 9 16:59``."""
+    now = time.time() if now is None else now
+
+    def until(expiry) -> str:
+        clock = data.reset_clock({"resets_at": expiry}, now) if isinstance(expiry, str) else None
+        return f" until {clock}" if clock else ""
+
+    if credits.get("eligible") is False:
+        return "not offered"
+    kinds = [k for k in credits.get("kinds") or [] if isinstance(k, dict) and k.get("count")]
+    if kinds:
+        return ", ".join(f"{k['kind']} {k['count']}{until(k.get('expires'))}" for k in kinds)
+    count = credits.get("available", credits.get("available_count"))
+    count = count if type(count) is int and count >= 0 else 0
+    scopes = {n: c for n, c in (credits.get("by_scope") or {}).items() if type(c) is int and c > 0}
+    if scopes:
+        return ", ".join(f"{n} {c}" for n, c in scopes.items()) + until(credits.get("next_expiry"))
+    return f"{count}" + (until(credits.get("next_expiry")) if count else "")
+
+
+def reset_row(product: str, credits: dict, label_w: int, *, palette: Palette = Palette.DARK) -> Text:
+    """The card's last row, on the shared label column: ``Claude resets  7d 1 until …``."""
+    text = Text("\n    ")
+    text.append(f"{f'{product} resets':<{label_w}} ", style=palette.muted)
+    text.append(reset_credit_detail(credits), style=palette.muted)
+    return text
 
 
 def reset_credit_text(product: str, credits: dict, now: float | None = None) -> str:
@@ -730,8 +769,6 @@ def ext_header_bits(acc: "ExternalAccount", prefix: str, *, palette: Palette = P
         plan = _plan_text(acc.plan)
         named = plan if plan.casefold().startswith(product.casefold()) else f"{product} {plan}"
         text.append(f"   · {named}", style=palette.muted)
-    if acc.reset_credits is not None:
-        text.append(f"   · {reset_credit_text(product, acc.reset_credits)}", style=palette.muted)
     if acc.note:
         text.append(f"   · {product} {acc.note}", style=palette.muted)
     return text

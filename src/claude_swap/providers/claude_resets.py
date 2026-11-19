@@ -19,7 +19,7 @@ import re
 import shutil
 import subprocess
 import time
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -77,6 +77,42 @@ def _credits(value: object) -> ResetCredits | None:
         return None
 
 
+KIND_ORDER = ("5h", "7d", "Fable")
+
+
+def _kind(grant: dict) -> str:
+    """What a grant resets: a Fable reset, or the 5-hour / weekly limit."""
+    clears = [c for c in grant.get("clears") or [] if isinstance(c, str)]
+    if "fable" in str(grant.get("label", "")).casefold() or any("fable" in c for c in clears):
+        return "Fable"
+    if "five_hour" in clears:
+        return "5h"
+    if "seven_day" in clears:
+        return "7d"
+    return "other"
+
+
+def kinds_of(raw: dict, offers) -> list[dict]:
+    """``[{"kind", "count", "expires"}]`` per kind, earliest expiry first within a kind."""
+    grants = {g.get("id"): g for g in (raw.get("cedar_ember") or {}).get("grants") or [] if isinstance(g, dict)}
+    kinds: dict[str, dict] = {}
+    for offer in offers:
+        kind = _kind(grants.get(offer.credit_id, {}))
+        entry = kinds.setdefault(kind, {"kind": kind, "count": 0, "expires": None})
+        entry["count"] += offer.remaining
+        if offer.expires_at and (entry["expires"] is None or offer.expires_at < entry["expires"]):
+            entry["expires"] = offer.expires_at
+    order = {k: i for i, k in enumerate(KIND_ORDER)}
+    return sorted(kinds.values(), key=lambda e: (order.get(e["kind"], len(order)), e["kind"]))
+
+
+def cached_raw(email: str, root: Path | None = None) -> dict | None:
+    """The stored inventory as a dict, with its per-kind breakdown ("kinds")."""
+    entry = _load(root).get(email)
+    credits = entry.get("credits") if isinstance(entry, dict) else None
+    return credits if isinstance(credits, dict) else None
+
+
 def cached(email: str, root: Path | None = None) -> ResetCredits | None:
     """The last inventory read for this account, however old; None if never read."""
     entry = _load(root).get(email)
@@ -116,8 +152,14 @@ def refresh(email: str, credentials: str, root: Path | None = None) -> ResetCred
     except ProviderError:
         _save(email, root, attempted_at=now)
         raise
-    credits, _ = claude_reset_offers(raw)
-    _save(email, root, at=now, attempted_at=now, credits=None if credits is None else asdict(credits))
+    credits, offers = claude_reset_offers(raw)
+    record = None
+    if credits is not None:
+        kinds = kinds_of(raw, offers)
+        if kinds:
+            credits = replace(credits, by_scope={e["kind"]: e["count"] for e in kinds})
+        record = {**asdict(credits), "kinds": kinds}
+    _save(email, root, at=now, attempted_at=now, credits=record)
     return credits
 
 

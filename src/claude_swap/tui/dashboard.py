@@ -403,9 +403,9 @@ class WatchScreen(AccountListScreen):
         claude_resets.refresh_due(accounts)
         credits = {}
         for email, _creds in accounts:
-            cached = claude_resets.cached(email)
+            cached = claude_resets.cached_raw(email)
             if cached is not None:
-                credits[email] = asdict(cached)
+                credits[email] = cached
         self.app.call_from_thread(self._claude_credits_loaded, credits)
 
     def _claude_credits_loaded(self, credits: dict[str, dict]) -> None:

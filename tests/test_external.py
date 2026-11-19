@@ -338,7 +338,8 @@ class TestResetCreditsAndNotStarted:
                                    reset_credits=ResetCredits(3, by_scope={"5h": 0, "7d": 3}))
         monkeypatch.setattr(quota, "collect_quota", lambda *_args, **_kwargs: [row])
         account, = external.fetch(external.BUILTIN[2])
-        assert "5h 0, 7d 3" in widgets.ext_header_bits(account, "").plain
+        rows = widgets.ext_rows(account, "", 120, 12).plain
+        assert "GLM resets" in rows and "7d 3" in rows and "5h 0" not in rows
 
     def test_claude_card_shows_credits_without_other_products(self):
         from claude_swap.models import AccountSnapshot
@@ -349,7 +350,8 @@ class TestResetCreditsAndNotStarted:
             kind="oauth", switchable=True,
             usage=UsageEntry(last_good={"five_hour": {"pct": 40}, "reset_credits": {"available_count": 0}}),
         )
-        assert "Claude 0 reset credits" in widgets.account_card_text(account, 120).plain
+        card = widgets.account_card_text(account, 120).plain
+        assert "Claude resets" in card and card.rstrip().endswith("0")
 
     def test_claude_reading_keeps_its_reset_credits(self):
         from claude_swap import oauth
@@ -365,15 +367,38 @@ class TestResetCreditsAndNotStarted:
         assert "reset_credits" not in (oauth.build_usage_result({"five_hour": {"utilization": 1}}) or {})
 
     def test_one_wording_for_every_product(self):
-        assert widgets.reset_credit_text("Claude", {"available": 0}) == "Claude 0 reset credits"
-        line = widgets.reset_credit_text("Codex", {"available": 1, "next_expiry": "2099-12-13T06:36:00+00:00"})
-        assert line.startswith("Codex 1 reset credit until ")
+        detail = widgets.reset_credit_detail
+        assert detail({"available": 0}) == "0"
+        assert detail({"available_count": 0, "eligible": False}) == "not offered"
+        assert detail({"available": 1, "next_expiry": "2099-12-13T06:36:00+00:00"}).startswith("1 until ")
+        kinds = detail({"available_count": 4, "kinds": [
+            {"kind": "7d", "count": 1, "expires": "2099-12-10T22:00:00+00:00"},
+            {"kind": "Fable", "count": 3, "expires": "2099-03-09T07:59:00+00:00"}]})
+        assert kinds.startswith("7d 1 until ") and ", Fable 3 until " in kinds
         acc = external.ExternalAccount("codex", "a@example.com", product="Codex",
                                        reset_credits={"available": 1, "next_expiry": None})
-        assert widgets.ext_header_bits(acc, "Codex").plain == "   · Codex 1 reset credit"
+        assert "reset" not in widgets.ext_header_bits(acc, "Codex").plain  # the row carries it
+        assert widgets.ext_rows(acc, "", 120, 12).plain.strip() == "Codex resets 1"
 
     def test_an_unstarted_window_says_so(self):
         rows = widgets.usage_rows({"five_hour": {"pct": 0}}, time.time())
         assert rows[0][2] == "not started"
         acc = external.ExternalAccount("plans", "zai-glm", windows=(external.ExternalWindow("GLM 5h", 0.0),))
         assert "not started" in widgets.ext_rows(acc, "", 120, 10).plain
+
+
+def test_claude_grants_are_told_apart_by_kind():
+    from claude_swap.providers import claude_resets
+    from claude_swap.providers.reset_credits import ResetOffer
+
+    raw = {"cedar_ember": {"grants": [
+        {"id": "w", "label": "One full limit reset (November 2026)", "clears": ["seven_day", "seven_day_overage_included"]},
+        {"id": "f1", "label": "New model launch: one Fable reset", "clears": ["seven_day_overage_included"]},
+        {"id": "f2", "label": "one more Fable reset at 12 months' tenure", "clears": ["seven_day_overage_included"]},
+    ]}}
+    offers = [ResetOffer("w", "2099-12-10T22:00:00+00:00"), ResetOffer("f1", "2099-03-09T07:59:00+00:00"),
+              ResetOffer("f2", "2099-03-09T07:59:00+00:00")]
+    assert claude_resets.kinds_of(raw, offers) == [
+        {"kind": "7d", "count": 1, "expires": "2099-12-10T22:00:00+00:00"},
+        {"kind": "Fable", "count": 2, "expires": "2099-03-09T07:59:00+00:00"},
+    ]

@@ -101,7 +101,7 @@ class Source:
 # switches on its own, so its accounts stay together (merge = true in
 # external.toml draws a same-email login on the Claude card instead).
 BUILTIN = (
-    Source("agy", title="Antigravity", label="agy", every=300, timeout=240, providers=("agy",)),
+    Source("agy", title="Antigravity", every=300, timeout=240, providers=("agy",)),
     Source("codex", title="Codex", label="Codex", providers=("codex",)),
     Source("plans", title="Coding plans", providers=("kimi-coding", "zai-glm", "opencode-go")),
 )
@@ -323,6 +323,12 @@ def _credits(value: object) -> dict | None:
             credits["by_scope"] = counts
     if value.get("eligible") is False:
         credits["eligible"] = False
+    kinds = [{"kind": str(k["kind"]), "count": k["count"],
+              "expires": k.get("expires") if isinstance(k.get("expires"), str) else None}
+             for k in value.get("kinds") or []
+             if isinstance(k, dict) and k.get("kind") and type(k.get("count")) is int and k["count"] >= 0]
+    if kinds:
+        credits["kinds"] = kinds
     return credits
 
 
