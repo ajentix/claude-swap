@@ -302,9 +302,23 @@ def _finish(source: Source, claim: str, rows: list, error: str) -> None:
             return
         now = time.time()
         if not error:
-            entry.update(at=now, rows=rows)
+            entry.update(at=now, rows=_keep_last_windows(entry.get("rows"), rows))
         entry.update(attempted_at=now, claimed_at=0, claim=None, error=error)
         _write_store(data, source.name, entry)
+
+
+def _keep_last_windows(previous: object, rows: list) -> list:
+    """An account read without windows (skipped for low memory, a failed call)
+    keeps the bars of its last reading, with this read's reason under them."""
+    last = {r.get("account"): r for r in previous if isinstance(r, dict)} if isinstance(previous, list) else {}
+    kept = []
+    for row in rows:
+        old = last.get(row.get("account")) if isinstance(row, dict) else None
+        if isinstance(row, dict) and not row.get("windows") and isinstance(old, dict) and old.get("windows"):
+            row = {**row, "windows": old["windows"], "plan": row.get("plan") or old.get("plan"),
+                   "error": f"{row.get('error') or 'not read'}; showing the last reading"}
+        kept.append(row)
+    return kept
 
 
 def fetch(source: Source, *, force: bool = False) -> list[ExternalAccount]:

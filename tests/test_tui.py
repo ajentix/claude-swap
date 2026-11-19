@@ -1339,7 +1339,12 @@ class TestWatchScreen:
             await settle(pilot)
             assert not any(call[0] == "switch_to" for call in fake_calls(app))
 
-    async def test_s_arms_selection_switch_stays_watching(self, tmp_path):
+    async def test_s_arms_selection_switch_stays_watching(self, tmp_path, monkeypatch):
+        from claude_swap import external
+
+        # Claude accounts only: the built-in sources would read this machine's real
+        # Antigravity keyring and add a section (and a Claude Code heading) above.
+        monkeypatch.setattr(external, "load_sources", lambda path=None: [])
         fake = self._fake(tmp_path)
         app = make_app(fake)
         async with app.run_test(size=(100, 40)) as pilot:

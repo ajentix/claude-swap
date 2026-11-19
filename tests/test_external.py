@@ -316,3 +316,12 @@ class TestPlanByHand:
             external.plan_command(["nope", "x", "y"], "cswap")
         external.plan_command(["agy", "a@example.com", "--unset"], "cswap")
         assert external.plan_overrides() == {}
+
+
+def test_account_read_without_windows_keeps_its_last_bars(root):
+    src = source(root, rows=[{"account": "a@example.com", "windows": [{"name": "Claude 5h", "used_pct": 40}]}])
+    external.fetch(src)
+    (root / "agy.json").write_text(json.dumps([{"account": "a@example.com", "error": "needs RAM", "windows": []}]), "utf-8")
+    (a,) = external.fetch(src, force=True)
+    assert [(w.name, w.used_pct) for w in a.windows] == [("Claude 5h", 40.0)]
+    assert a.error == "needs RAM; showing the last reading"
