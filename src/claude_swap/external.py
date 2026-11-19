@@ -5,6 +5,7 @@ A source is a pair of commands configured in ``<backup root>/external.toml``
 
     [[source]]
     name = "agy"
+    title = "Antigravity"   # section heading (default: name)
     list = ["py", "-X", "utf8", "C:/tools/agy_quota.py"]
     switch = ["py", "-X", "utf8", "C:/tools/agy_switch.py", "{account}"]  # optional
     every = 300     # seconds between list runs (default 120)
@@ -68,6 +69,7 @@ class ExternalAccount:
 class Source:
     name: str
     list_cmd: tuple[str, ...]
+    title: str = ""
     switch_cmd: tuple[str, ...] = ()
     every: float = 120.0
     timeout: float = 120.0
@@ -95,6 +97,7 @@ def load_sources(path: Path | None = None) -> list[Source]:
         sources.append(Source(
             name=name,
             list_cmd=tuple(cmd),
+            title=str(entry.get("title") or name),
             switch_cmd=tuple(switch) if _is_cmd(switch) else (),
             every=float(entry.get("every", 120)),
             timeout=float(entry.get("timeout", 120)),

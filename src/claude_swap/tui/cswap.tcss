@@ -60,6 +60,14 @@ Screen {
     border-left: thick $primary;
 }
 
+#accounts ListItem.ext-header {
+    margin-bottom: 0;
+}
+
+#accounts ListItem.ext-tight {
+    margin-bottom: 0;
+}
+
 #accounts ListItem.flash {
     background: $panel;
 }

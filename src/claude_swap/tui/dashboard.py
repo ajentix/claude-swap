@@ -28,7 +28,9 @@ from textual.widgets import Footer, ListView, Static
 
 from claude_swap import external
 from claude_swap.models import AccountsSnapshot
-from claude_swap.tui.widgets import AccountItem, AccountsPanel, ExternalItem, MenuItem
+from claude_swap.tui.widgets import (
+    AccountItem, AccountsPanel, ExternalHeader, ExternalItem, ExternalRow, MenuItem,
+)
 
 if TYPE_CHECKING:
     from claude_swap.tui.app import CswapApp
@@ -398,16 +400,31 @@ class WatchScreen(AccountListScreen):
     async def _sync_external(self) -> None:
         async with self._list_lock:
             listview = self.query_one("#accounts", ListView)
-            wanted = [acc for name in self._sources for acc in self._external.get(name, [])]
-            items = list(listview.query(ExternalItem))
-            if [i.acc.key for i in items] == [a.key for a in wanted]:
-                for item, acc in zip(items, wanted):
-                    item.set_account(acc)
+            wanted: list = []  # ("header", name, title) or an account
+            for name, source in self._sources.items():
+                accounts = self._external.get(name, [])
+                if accounts:
+                    wanted.append(("header", name, source.title))
+                    wanted.extend(accounts)
+            keys = [w[:2] if isinstance(w, tuple) else w.key for w in wanted]
+            items = list(listview.query(ExternalRow))
+            if [i.key for i in items] == keys:
+                for item, w in zip(items, wanted):
+                    if isinstance(item, ExternalItem):
+                        item.set_account(w)
                 return
             index = listview.index
             for item in items:
                 await item.remove()
-            await listview.extend(ExternalItem(acc) for acc in wanted)
+            rows = []
+            for n, w in enumerate(wanted):
+                if isinstance(w, tuple):
+                    rows.append(ExternalHeader(w[1], w[2]))
+                    continue
+                one_line = all(" " not in x.name for x in w.windows)
+                nxt = wanted[n + 1] if n + 1 < len(wanted) else None
+                rows.append(ExternalItem(w, tight=one_line and nxt is not None and not isinstance(nxt, tuple)))
+            await listview.extend(rows)
             if self._selecting and index is not None:
                 listview.index = min(index, len(listview.children) - 1)
 
