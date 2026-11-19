@@ -26,7 +26,7 @@ from claude_swap.tui import data
 from claude_swap.tui.theme import Palette
 
 if TYPE_CHECKING:
-    from claude_swap.external import ExternalAccount
+    from claude_swap.external import ExternalAccount, ExternalWindow
     from claude_swap.tui.app import CswapApp
 
 _BAR_FILLED = "━"
@@ -598,72 +598,46 @@ class MenuItem(ListItem):
 
 
 # -- external sources (external.py) ------------------------------------------------
-# Drawn on the Claude card grid: the account at column 4 like the Claude emails,
-# rows indented 4, the same bar width formula. A window name "Family 7d" groups by
-# family; each family is one row whose bar is its tighter window, the other window
-# follows in the suffix. A source with no families (coding plans) is one line each.
+# Drawn like a Claude card: the account at column 4, then one bar row per window,
+# labelled "<source label> <window>" ("agy Claude 5h", "Kimi 7d") on the label
+# column the screen shares, so every bar, % and reset lines up.
+
 
 def _bar_width(width: int, label_w: int) -> int:
     return max(12, min(30, width - 42 - label_w))  # a Claude card's formula
 
 
-def plan_label(acc: "ExternalAccount") -> str:
-    return acc.account + (f" · {acc.plan}" if acc.plan else "")
-
-
-def _family(name: str) -> tuple[str, str]:
-    head, _, tail = name.rpartition(" ")
-    return (head, tail) if head else ("", name)
-
-
-def _window_rows(acc: "ExternalAccount") -> list[tuple[str, list]]:
-    groups: dict[str, list] = {}
-    for w in acc.windows:
-        family, short = _family(w.name)
-        groups.setdefault(family, []).append((short, w))
-    return list(groups.items())
-
-
-def _family_bar(label: str, wins: list, width: int, palette: Palette) -> Text:
-    """One bar for a family: its most-used window; the others follow as ``· 5h 14%``."""
-    measured = [(s, w) for s, w in wins if w.used_pct is not None]
-    if not measured:
-        text = Text(f"{label} ", style=palette.muted)
-        text.append(bar_cells(None, width, palette=palette))
-        text.append("  " + (wins[0][1].note if wins else "unavailable"), style=palette.muted)
-        return text
-    short, top = max(measured, key=lambda sw: sw[1].used_pct)
-    suffix = f"{short} resets {top.resets}" if top.resets else short
-    if top.used_pct >= 100:
-        suffix += "  (!)"
-    for s, w in wins:
-        if w is top:
-            continue
-        suffix += f"  · {s} " + (f"{w.used_pct:.0f}%" if w.used_pct is not None else (w.note or "n/a"))
-    return usage_bar(label, top.used_pct, suffix, width, palette=palette)
+def _row_label(prefix: str, window: "ExternalWindow") -> str:
+    return f"{prefix} {window.name}".strip()
 
 
 def ext_label_width(acc: "ExternalAccount", prefix: str) -> int:
-    return max((len(f"{prefix} {family}".strip()) for family, _ in _window_rows(acc)), default=0)
+    return max((len(_row_label(prefix, w)) for w in acc.windows), default=0)
 
 
 def ext_rows(acc: "ExternalAccount", prefix: str, width: int, label_w: int, *, palette: Palette = Palette.DARK) -> Text:
-    """The account's family rows, each on its own indented line, labelled
-    ``<prefix> <family>``; the first row carries the source's active marker."""
+    """One indented bar row per window; the first carries the active marker."""
     text = Text()
     bar_w = _bar_width(width, label_w)
-    for i, (family, wins) in enumerate(_window_rows(acc)):
-        label = f"{prefix} {family}".strip()
+    for i, w in enumerate(acc.windows):
+        label = f"{_row_label(prefix, w):<{label_w}}"
         text.append("\n    ")
-        text.append(_family_bar(f"{label:<{label_w}}", wins, bar_w, palette))
-        if i == 0:
-            if acc.active:
-                text.append(f"   ● {prefix or acc.source} active", style=f"bold {palette.accent}")
-            if acc.note:
-                text.append(f"   {acc.note}", style=palette.muted)
+        if w.used_pct is None:
+            text.append(f"{label} ", style=palette.muted)
+            text.append(bar_cells(None, bar_w, palette=palette))
+            text.append(f"  {w.note or 'unavailable'}", style=palette.muted)
+        else:
+            suffix = f"resets {w.resets}" if w.resets else ""
+            if w.used_pct >= 100:
+                suffix = f"{suffix}  (!)" if suffix else "(!)"
+            if w.note:
+                suffix = f"{suffix}  {w.note}" if suffix else w.note
+            text.append(usage_bar(label, w.used_pct, suffix or None, bar_w, palette=palette))
+        if i == 0 and acc.active:
+            text.append(f"   ● {prefix or acc.source} active", style=f"bold {palette.accent}")
     if acc.error:
         text.append("\n    ")
-        text.append(f"⚠ {prefix or acc.source}: {acc.error}", style=palette.sev_warn)
+        text.append(f"⚠ {acc.error}", style=palette.sev_warn)
     return text
 
 
@@ -675,26 +649,9 @@ def _age(acc: "ExternalAccount") -> str | None:
 
 def external_card_text(acc: "ExternalAccount", width: int, *, prefix: str = "", label_w: int | None = None,
                        palette: Palette = Palette.DARK) -> Text:
-    groups = _window_rows(acc)
-    age = _age(acc)
-    text = Text()
-    if [f for f, _ in groups] in ([""], []):  # one line: name, bar, figures
-        lw = label_w or len(plan_label(acc))
-        label = f"{plan_label(acc):<{lw}}"
-        text.append("    ")
-        if acc.error or not groups:
-            text.append(label + " ", style=palette.foreground)
-            text.append(acc.error or "usage unavailable", style=palette.sev_warn if acc.error else palette.muted)
-            return text
-        line = _family_bar(label, groups[0][1], _bar_width(width, lw), palette)
-        line.stylize(palette.foreground, 0, len(label))
-        text.append(line)
-        if age:
-            text.append(f"  {age}", style=palette.muted)
-        return text
-    text.append("    ")
+    text = Text("    ")
     text.append(acc.account, style=palette.foreground)
-    for note in (f"· {acc.plan}" if acc.plan else None, age):
+    for note in (f"· {acc.plan}" if acc.plan else None, f"· {acc.note}" if acc.note else None, _age(acc)):
         if note:
             text.append(f"   {note}", style=palette.muted)
     text.append(ext_rows(acc, prefix, width, label_w or ext_label_width(acc, prefix), palette=palette))
@@ -737,10 +694,10 @@ class ExternalHeader(ExternalRow):
 
 
 class ExternalItem(ExternalRow):
-    """One external-source account; one-line sources pack tight."""
+    """One external-source account, drawn like a Claude card."""
 
-    def __init__(self, acc: "ExternalAccount", *, prefix: str = "", tight: bool = False) -> None:
-        super().__init__(ExternalCard(acc, prefix), classes="ext-tight" if tight else "")
+    def __init__(self, acc: "ExternalAccount", *, prefix: str = "") -> None:
+        super().__init__(ExternalCard(acc, prefix))
         self.acc = acc
         self.key = acc.key
 

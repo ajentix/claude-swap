@@ -64,10 +64,6 @@ Screen {
     margin-bottom: 0;
 }
 
-#accounts ListItem.ext-tight {
-    margin-bottom: 0;
-}
-
 #accounts ListItem.flash {
     background: $panel;
 }

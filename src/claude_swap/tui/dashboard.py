@@ -31,7 +31,7 @@ from claude_swap.models import AccountsSnapshot
 from claude_swap.tui.modals import ChoiceModal
 from claude_swap.tui.widgets import (
     AccountItem, AccountsPanel, ExternalHeader, ExternalItem, ExternalRow, MenuItem,
-    ext_label_width, plan_label,
+    ext_label_width,
 )
 
 if TYPE_CHECKING:
@@ -426,7 +426,7 @@ class WatchScreen(AccountListScreen):
             labels = [prefix + label for item in listview.query(AccountItem) for label in item.row_labels()]
             for name, source in self._sources.items():
                 for acc in self._external.get(name, []):
-                    labels.append("x" * (ext_label_width(acc, source.label) or len(plan_label(acc))))
+                    labels.append("x" * ext_label_width(acc, source.label))
             label_w = max(map(len, labels), default=0) or None
             self._grid = (prefix, label_w)
             for item in listview.query(AccountItem):
@@ -447,10 +447,7 @@ class WatchScreen(AccountListScreen):
                 if isinstance(w, tuple):
                     rows.append(ExternalHeader(w[1], w[2]))
                     continue
-                one_line = all(" " not in x.name for x in w.windows)
-                nxt = wanted[n + 1] if n + 1 < len(wanted) else None
-                rows.append(ExternalItem(w, prefix=self._sources[w.source].label,
-                                         tight=one_line and nxt is not None and not isinstance(nxt, tuple)))
+                rows.append(ExternalItem(w, prefix=self._sources[w.source].label))
             await listview.extend(rows)
             for row in rows:
                 if isinstance(row, ExternalItem):
