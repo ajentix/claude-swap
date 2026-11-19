@@ -257,6 +257,8 @@ def account_card_text(
     palette: Palette = Palette.DARK,
     show_tag: bool = True,
     login: str | None = "full",
+    label_prefix: str = "",
+    fixed_label_width: int | None = None,
 ) -> Text:
     """The full account card: header line + per-window bar rows. Each row's
     tick is the switch line that row is judged against: ``threshold`` on the
@@ -315,7 +317,7 @@ def account_card_text(
         return text
 
     stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
-    label_width = max(len(label) for label, _pct, _suffix, _full in rows)
+    label_width = fixed_label_width or max(len(label_prefix + label) for label, _pct, _suffix, _full in rows)
     bar_width = max(12, min(30, width - 42 - label_width))
     for label, pct, suffix, suffix_full in rows:
         # everything on a row except the suffix: indent, label, bar, " NNN%"
@@ -333,7 +335,7 @@ def account_card_text(
         text.append("\n    ")
         text.append(
             usage_bar(
-                f"{label:<{label_width}}",
+                f"{label_prefix + label:<{label_width}}",
                 pct,
                 suffix or None,
                 bar_width,
@@ -525,6 +527,8 @@ class AccountCard(Static):
         self._acc = acc
         self._threshold = threshold
         self._extras: list = []  # (prefix, ExternalAccount) with this card's email
+        self._prefix = ""  # product name before each Claude row ("Claude 7d") once a screen mixes products
+        self._label_w: int | None = None  # label column shared by every card on the screen
 
     def set_account(self, acc: AccountSnapshot) -> None:
         self._acc = acc
@@ -535,15 +539,21 @@ class AccountCard(Static):
             self._extras = list(extras)
             self.refresh(layout=True)
 
+    def set_grid(self, prefix: str, label_w: int | None) -> None:
+        if (prefix, label_w) != (self._prefix, self._label_w):
+            self._prefix, self._label_w = prefix, label_w
+            self.refresh(layout=True)
+
     def render(self) -> Text:
         width = self.size.width or 80
         palette = Palette.from_theme(self.app.current_theme)
         card = fitted_card_text(
             self._acc, width, width, threshold=self._threshold, palette=palette,
+            label_prefix=self._prefix, fixed_label_width=self._label_w,
             show_tag=self.app.tag_shown(self._acc),
         )
         if self._extras:
-            label_w = max(CLAUDE_LABEL, *(ext_label_width(ext, p) for p, ext in self._extras))
+            label_w = self._label_w or max(ext_label_width(ext, p) for p, ext in self._extras)
             for prefix, ext in self._extras:
                 card.append(ext_rows(ext, prefix, width, label_w, palette=palette))
         return card
@@ -568,6 +578,13 @@ class AccountItem(ListItem):
         self.extras = list(extras)
         self.query_one(AccountCard).set_extras(extras)
 
+    def set_grid(self, prefix: str, label_w: int | None) -> None:
+        self.query_one(AccountCard).set_grid(prefix, label_w)
+
+    def row_labels(self) -> list[str]:
+        card = self.query_one(AccountCard)
+        return [label for label, *_ in usage_rows(card._acc.usage.last_good, time.time(), card._acc.usage.fetched_at)]
+
 
 class MenuItem(ListItem):
     """One menu row: a label plus an action id the screen dispatches on."""
@@ -586,15 +603,12 @@ class MenuItem(ListItem):
 # family; each family is one row whose bar is its tighter window, the other window
 # follows in the suffix. A source with no families (coding plans) is one line each.
 
-EXT_PLAN_LABEL = 16
-CLAUDE_LABEL = 5  # "Fable"/"spend": the label width of a Claude card
+def _bar_width(width: int, label_w: int) -> int:
+    return max(12, min(30, width - 42 - label_w))  # a Claude card's formula
 
 
-def _ext_bar_width(width: int, label_w: int) -> int:
-    """Shorter than a Claude bar by the extra label width, so the % and reset
-    columns line up with the Claude cards above."""
-    claude = max(12, min(30, width - 42 - CLAUDE_LABEL))
-    return max(8, claude - max(0, label_w - CLAUDE_LABEL))
+def plan_label(acc: "ExternalAccount") -> str:
+    return acc.account + (f" · {acc.plan}" if acc.plan else "")
 
 
 def _family(name: str) -> tuple[str, str]:
@@ -637,7 +651,7 @@ def ext_rows(acc: "ExternalAccount", prefix: str, width: int, label_w: int, *, p
     """The account's family rows, each on its own indented line, labelled
     ``<prefix> <family>``; the first row carries the source's active marker."""
     text = Text()
-    bar_w = _ext_bar_width(width, label_w)
+    bar_w = _bar_width(width, label_w)
     for i, (family, wins) in enumerate(_window_rows(acc)):
         label = f"{prefix} {family}".strip()
         text.append("\n    ")
@@ -659,19 +673,20 @@ def _age(acc: "ExternalAccount") -> str | None:
     return None
 
 
-def external_card_text(acc: "ExternalAccount", width: int, *, prefix: str = "", palette: Palette = Palette.DARK) -> Text:
+def external_card_text(acc: "ExternalAccount", width: int, *, prefix: str = "", label_w: int | None = None,
+                       palette: Palette = Palette.DARK) -> Text:
     groups = _window_rows(acc)
     age = _age(acc)
     text = Text()
     if [f for f, _ in groups] in ([""], []):  # one line: name, bar, figures
-        label = acc.account + (f" · {acc.plan}" if acc.plan else "")
-        label = f"{label:<{EXT_PLAN_LABEL}}"
+        lw = label_w or len(plan_label(acc))
+        label = f"{plan_label(acc):<{lw}}"
         text.append("    ")
         if acc.error or not groups:
             text.append(label + " ", style=palette.foreground)
             text.append(acc.error or "usage unavailable", style=palette.sev_warn if acc.error else palette.muted)
             return text
-        line = _family_bar(label, groups[0][1], _ext_bar_width(width, EXT_PLAN_LABEL), palette)
+        line = _family_bar(label, groups[0][1], _bar_width(width, lw), palette)
         line.stylize(palette.foreground, 0, len(label))
         text.append(line)
         if age:
@@ -682,7 +697,7 @@ def external_card_text(acc: "ExternalAccount", width: int, *, prefix: str = "", 
     for note in (f"· {acc.plan}" if acc.plan else None, age):
         if note:
             text.append(f"   {note}", style=palette.muted)
-    text.append(ext_rows(acc, prefix, width, max(CLAUDE_LABEL, ext_label_width(acc, prefix)), palette=palette))
+    text.append(ext_rows(acc, prefix, width, label_w or ext_label_width(acc, prefix), palette=palette))
     return text
 
 
@@ -691,13 +706,19 @@ class ExternalCard(Static):
         super().__init__()
         self._acc = acc
         self._prefix = prefix
+        self._label_w: int | None = None
+
+    def set_grid(self, label_w: int | None) -> None:
+        if label_w != self._label_w:
+            self._label_w = label_w
+            self.refresh(layout=True)
 
     def set_account(self, acc: "ExternalAccount") -> None:
         self._acc = acc
         self.refresh(layout=True)
 
     def render(self) -> Text:
-        return external_card_text(self._acc, self.size.width or 80, prefix=self._prefix,
+        return external_card_text(self._acc, self.size.width or 80, prefix=self._prefix, label_w=self._label_w,
                                   palette=Palette.from_theme(self.app.current_theme))
 
 
@@ -726,3 +747,6 @@ class ExternalItem(ExternalRow):
     def set_account(self, acc: "ExternalAccount") -> None:
         self.acc = acc
         self.query_one(ExternalCard).set_account(acc)
+
+    def set_grid(self, label_w: int | None) -> None:
+        self.query_one(ExternalCard).set_grid(label_w)

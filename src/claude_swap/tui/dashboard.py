@@ -31,6 +31,7 @@ from claude_swap.models import AccountsSnapshot
 from claude_swap.tui.modals import ChoiceModal
 from claude_swap.tui.widgets import (
     AccountItem, AccountsPanel, ExternalHeader, ExternalItem, ExternalRow, MenuItem,
+    ext_label_width, plan_label,
 )
 
 if TYPE_CHECKING:
@@ -414,16 +415,29 @@ class WatchScreen(AccountListScreen):
                     else:
                         rest.append(acc)
                 if rest:
-                    wanted.append(("header", name, source.title))
+                    if not source.merge:  # merged sources' own accounts read as more account cards
+                        wanted.append(("header", name, source.title))
                     wanted.extend(rest)
             for item in listview.query(AccountItem):
                 item.set_extras(merged.get(item.email, []))
+            # One label column for the whole screen: Claude rows read "Claude 7d"
+            # beside "agy Gemini", and every bar, % and reset lines up.
+            prefix = "Claude " if any(self._external.values()) else ""
+            labels = [prefix + label for item in listview.query(AccountItem) for label in item.row_labels()]
+            for name, source in self._sources.items():
+                for acc in self._external.get(name, []):
+                    labels.append("x" * (ext_label_width(acc, source.label) or len(plan_label(acc))))
+            label_w = max(map(len, labels), default=0) or None
+            self._grid = (prefix, label_w)
+            for item in listview.query(AccountItem):
+                item.set_grid(prefix, label_w)
             keys = [w[:2] if isinstance(w, tuple) else w.key for w in wanted]
             items = list(listview.query(ExternalRow))
             if [i.key for i in items] == keys:
                 for item, w in zip(items, wanted):
                     if isinstance(item, ExternalItem):
                         item.set_account(w)
+                        item.set_grid(label_w)
                 return
             index = listview.index
             for item in items:
@@ -438,6 +452,9 @@ class WatchScreen(AccountListScreen):
                 rows.append(ExternalItem(w, prefix=self._sources[w.source].label,
                                          tight=one_line and nxt is not None and not isinstance(nxt, tuple)))
             await listview.extend(rows)
+            for row in rows:
+                if isinstance(row, ExternalItem):
+                    row.set_grid(label_w)
             if self._selecting and index is not None:
                 listview.index = min(index, len(listview.children) - 1)
 
