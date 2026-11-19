@@ -1439,6 +1439,10 @@ def main() -> None:
     force_utf8_output()
     _use_native_tls()
     argv = sys.argv[1:]
+    if argv and argv[0] == "plan":
+        from claude_swap.external import plan_command
+
+        sys.exit(plan_command(argv[1:], _prog_name()))
     if argv and argv[0] in {"quota", "reset", "agy", "codex"}:
         from claude_swap.providers.cli import provider_command, quota_command, reset_command
 
@@ -1514,6 +1518,7 @@ def main() -> None:
 Commands:
   %(prog)s help                       show this help
   %(prog)s quota                      show quotas across providers
+  %(prog)s plan <source> <account> <name>  name a plan the provider does not report
   %(prog)s reset <provider> <account> use one subscription reset credit
   %(prog)s agy <command>              manage Antigravity logins
   %(prog)s codex <command>            manage direct Codex logins

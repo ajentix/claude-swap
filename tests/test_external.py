@@ -263,3 +263,28 @@ class TestCodex:
         monkeypatch.setattr(api, "build_opener", opener)
         with pytest.raises(ProviderError, match="edge"):
             api.get_usage("https://chatgpt.com/backend-api/wham/usage", {})
+
+
+class TestPlanByHand:
+    def test_set_wins_over_provider_and_star_is_the_default(self, root):
+        src = source(root, rows=[{"account": "a@example.com", "plan": "pro", "windows": []},
+                                 {"account": "b@example.com", "windows": []}])
+        external.set_plan("agy", "*", "Pro")
+        external.set_plan("agy", "a@example.com", "Ultra")
+        a, b = external.fetch(src)
+        assert (a.plan, b.plan) == ("Ultra", "Pro")
+        external.set_plan("agy", "a@example.com", None)
+        external.set_plan("agy", "*", None)
+        a, b = external.stored(src)
+        assert (a.plan, b.plan) == ("pro", None)
+        assert external.plan_overrides() == {}
+
+    def test_command(self, root, capsys):
+        assert external.plan_command(["agy", "a@example.com", "Ultra"], "cswap") == 0
+        assert external.plan_overrides() == {"agy": {"a@example.com": "Ultra"}}
+        external.plan_command([], "cswap")
+        assert "agy  a@example.com  Ultra" in capsys.readouterr().out
+        with pytest.raises(SystemExit):
+            external.plan_command(["nope", "x", "y"], "cswap")
+        external.plan_command(["agy", "a@example.com", "--unset"], "cswap")
+        assert external.plan_overrides() == {}

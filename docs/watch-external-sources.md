@@ -33,6 +33,18 @@ Nothing to configure for what cswap already manages ([provider setup](provider-q
 
 A provider with nothing set up stays hidden.
 
+Some providers do not report a plan name (Antigravity's tier, Kimi's membership). Set it by hand and it shows in the header like any other:
+
+```bash
+cswap plan agy you@example.com Ultra     # one account
+cswap plan agy '*' Pro                   # every account of that source
+cswap plan plans kimi-coding Allegretto  # a coding plan
+cswap plan agy you@example.com --unset
+cswap plan                               # list them
+```
+
+A name set by hand wins over the provider's. They are kept in `external_plans.json` in the backup root.
+
 ## Your own sources
 
 `external.toml` in the backup root (`~/.claude-swap-backup/` on Windows and macOS, `~/.local/share/claude-swap/` on Linux) can turn a built-in source off, replace it, or add one backed by your commands:

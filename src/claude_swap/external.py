@@ -48,6 +48,7 @@ from claude_swap.paths import get_backup_root
 
 CONFIG_NAME = "external.toml"
 STORE_NAME = "external_store.json"
+PLANS_NAME = "external_plans.json"  # plan names you set by hand: cswap plan
 _NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 
@@ -157,6 +158,7 @@ def _last_line(proc: subprocess.CompletedProcess) -> str:
 
 
 def _parse(source: Source, rows: list, fetched_at: float | None) -> list[ExternalAccount]:
+    by_hand = plan_overrides().get(source.name, {})
     accounts = []
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("account"), str):
@@ -175,7 +177,7 @@ def _parse(source: Source, rows: list, fetched_at: float | None) -> list[Externa
             source=source.name,
             account=row["account"],
             active=bool(row.get("active")),
-            plan=str(row["plan"]) if row.get("plan") else None,
+            plan=by_hand.get(row["account"]) or by_hand.get("*") or (str(row["plan"]) if row.get("plan") else None),
             note=str(row.get("note") or ""),
             error=str(row.get("error") or ""),
             windows=windows,
@@ -379,3 +381,65 @@ def _builtin_switch(source: Source, account: str) -> tuple[bool, str]:
         return False, "Could not access the local login store"
     invalidate_quota(provider)
     return True, f"Active {provider} account {label}"
+
+
+# -- plan names set by hand -------------------------------------------------------------
+# For what a provider does not report (an Antigravity tier, a Kimi membership):
+# ``cswap plan <source> <account|*> <name>``. A name set here wins over the provider's.
+
+def _plans_path() -> Path:
+    return get_backup_root() / PLANS_NAME
+
+
+def plan_overrides() -> dict[str, dict[str, str]]:
+    try:
+        data = json.loads(read_text_with_retry(_plans_path()))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {s: {a: n for a, n in accounts.items() if isinstance(n, str) and n.strip()}
+            for s, accounts in data.items() if isinstance(accounts, dict)}
+
+
+def set_plan(source: str, account: str, name: str | None) -> None:
+    with _store_lock:
+        data = plan_overrides()
+        accounts = data.setdefault(source, {})
+        if name and name.strip():
+            accounts[account] = name.strip()
+        else:
+            accounts.pop(account, None)
+        data = {s: a for s, a in data.items() if a}
+        atomic_write_text(_plans_path(), json.dumps(data, ensure_ascii=False, indent=1))
+
+
+def plan_command(argv: list[str], prog: str) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog=f"{prog} plan",
+        description="Set the plan name shown for an account on the watch screen, "
+                    "for what a provider does not report (an Antigravity tier, a Kimi membership).")
+    parser.add_argument("source", nargs="?", help="watch source: agy, codex, plans, or one of yours")
+    parser.add_argument("account", nargs="?", help="account as the watch screen shows it, or * for every account")
+    parser.add_argument("name", nargs="?", help='plan name, e.g. "Ultra"')
+    parser.add_argument("--unset", action="store_true", help="remove the name")
+    args = parser.parse_args(argv)
+    if args.source is None:
+        plans = plan_overrides()
+        if not plans:
+            print("No plan names set. Example: cswap plan agy you@example.com Ultra")
+        for source, accounts in plans.items():
+            for account, name in accounts.items():
+                print(f"{source}  {account}  {name}")
+        return 0
+    if args.account is None or (args.name is None and not args.unset):
+        parser.error("give a source, an account (or *) and a name, or --unset")
+    known = {s.name for s in load_sources()}
+    if args.source not in known:
+        parser.error(f"unknown source {args.source!r}; sources: {', '.join(sorted(known))}")
+    set_plan(args.source, args.account, None if args.unset else args.name)
+    shown = "removed" if args.unset else f"set to {args.name.strip()}"
+    print(f"{args.source} {args.account}: plan {shown}")
+    return 0
