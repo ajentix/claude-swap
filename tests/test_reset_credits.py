@@ -5,8 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from claude_swap import session
 from claude_swap.providers import cli, codex, common, reset, reset_credits
 from claude_swap.providers.accounts import Account
+from claude_swap.switcher import ClaudeAccountSwitcher
 
 
 def claude_usage(**changes):
@@ -204,6 +206,52 @@ def test_claude_verified_profile_and_single_post(monkeypatch, tmp_path):
     assert not calls
     assert reset.redeem_reset(intent, root=tmp_path, switcher=switcher) == "reset"
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "is_active, profile_expiry, drifted, stale, expected",
+    [
+        (False, 2000, False, False, "session-access"),
+        (False, 500, False, False, "slot-access"),
+        (False, 2000, True, False, "slot-access"),
+        (False, 2000, False, True, "slot-access"),
+        (True, 2000, False, False, "slot-access"),
+    ],
+)
+def test_claude_reset_inventory_uses_newer_matching_session_credential(
+    monkeypatch, tmp_path, is_active, profile_expiry, drifted, stale, expected,
+):
+    org = "cc38cbb0-f934-4ab0-afd9-a73221993c76"
+    email = "user@example.com"
+    slot = json.dumps({"claudeAiOauth": {"accessToken": "slot-access", "expiresAt": 1000}})
+    profile = json.dumps({"claudeAiOauth": {"accessToken": "session-access", "expiresAt": profile_expiry}})
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    creds_path = session_dir / ".credentials.json"
+    creds_path.write_text(profile, encoding="utf-8")
+    config = {"oauthAccount": {"emailAddress": "other@example.com" if drifted else email, "organizationUuid": org}}
+    (session_dir / ".claude.json").write_text(json.dumps(config), encoding="utf-8")
+    if stale:
+        session.stale_marker_for(session_dir).touch()
+
+    switcher = ClaudeAccountSwitcher()
+    monkeypatch.setattr(switcher, "_resolve_account_identifier", lambda _: "2")
+    monkeypatch.setattr(switcher, "_build_accounts_info", lambda: [(2, email, "", org, is_active, slot, "")])
+    monkeypatch.setattr(switcher, "_session_dir", lambda *_: session_dir)
+    monkeypatch.setattr(switcher, "_read_account_credentials_ex", lambda *_: (slot, False))
+
+    def get(url, headers):
+        assert headers["Authorization"] == f"Bearer {expected}"
+        if url == reset.CLAUDE_PROFILE_URL:
+            return {"account": {"email": email}, "organization": {"uuid": org}}
+        assert url == reset.CLAUDE_USAGE_URL
+        return claude_usage()
+
+    monkeypatch.setattr(reset, "get_usage", get)
+    monkeypatch.setattr(reset, "post_reset", lambda *_: pytest.fail("inventory must not redeem a credit"))
+    options = reset.reset_options("claude", "2", root=tmp_path, switcher=switcher)
+    assert options.credits.available_count == 3
+    assert creds_path.read_text(encoding="utf-8") == profile
 
 
 def test_confirmation_cancels_before_redeeming(monkeypatch, capsys):
