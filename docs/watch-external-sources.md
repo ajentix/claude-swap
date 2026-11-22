@@ -2,6 +2,8 @@
 
 `cswap watch` shows your other AI subscriptions beside your Claude accounts, a section per product, drawn the same way: each account's header names the product (`● Codex active · Codex Plus`), then one bar per rate-limit window with the same columns, the same `resets 2h 13m · 20:39` countdown and `(ahead of pace)` marker. `s` and Enter switch any of them.
 
+Each account shows when the displayed usage was last read in KST. If a later lookup fails, Watch keeps the last reading where available and shows the reason beside its timestamp.
+
 ```
 Claude Code
  1  you@example.com   ● Claude active   · Claude Ultra

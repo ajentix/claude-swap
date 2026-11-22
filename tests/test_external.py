@@ -150,14 +150,15 @@ class TestStore:
 
     def test_failed_run_keeps_last_rows_with_the_error(self, root):
         src = source(root)
-        external.fetch(src)
+        previous = external.fetch(src)
         from unittest.mock import patch
         from subprocess import CompletedProcess
 
         with patch.object(external, "_run", return_value=CompletedProcess([], 1, "", "private-value")):
             rows = external.fetch(src, force=True)
         assert [a.account for a in rows] == ["a@example.com", "b@example.com"]
-        assert rows[0].error == "list command exited with status 1"
+        assert [a.error for a in rows] == ["list command exited with status 1"] * 2
+        assert [a.fetched_at for a in rows] == [a.fetched_at for a in previous]
         assert external.fetch(src) == rows and not external.due(src)
 
     def test_replacing_command_discards_the_old_selection(self, root):
@@ -212,7 +213,8 @@ class TestRows:
         acc = external.fetch(source(root))[0]
         assert widgets.ext_label_width(acc, "agy") == len("agy Claude 5h")
         text = widgets.ext_rows(acc, "agy", 120, 16).plain
-        lines = text.strip("\n").split("\n")
+        status, *lines = text.strip("\n").split("\n")
+        assert status.startswith("    agy · Last read ") and status.endswith(" KST")
         assert len(lines) == 2
         assert lines[0].startswith("    agy Claude 5h   ") and "20%" in lines[0]
         assert "active" not in text  # the header carries it
@@ -231,8 +233,9 @@ class TestRows:
         acc = external.fetch(source(root))[1]
         card = widgets.external_card_text(acc, 120, prefix="agy", label_w=14)
         assert isinstance(card, Text)
-        header, row = card.plain.split("\n")
+        header, status, row = card.plain.split("\n")
         assert header.strip().startswith("b@example.com")
+        assert "Last read " in status
         assert row.startswith("    agy Gemini 7d ") and "100%" in row and "(!)" in row
 
 
@@ -378,7 +381,7 @@ class TestResetCreditsAndNotStarted:
         acc = external.ExternalAccount("codex", "a@example.com", product="Codex",
                                        reset_credits={"available": 1, "next_expiry": None})
         assert "reset" not in widgets.ext_header_bits(acc, "Codex").plain  # the row carries it
-        assert widgets.ext_rows(acc, "", 120, 12).plain.strip() == "Codex resets 1"
+        assert widgets.ext_rows(acc, "", 120, 12).plain.splitlines()[-1].strip() == "Codex resets 1"
 
     def test_an_unstarted_window_says_so(self):
         rows = widgets.usage_rows({"five_hour": {"pct": 0}}, time.time())

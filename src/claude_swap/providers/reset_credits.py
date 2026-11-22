@@ -24,6 +24,7 @@ class ResetOffer:
     label: str = "Reset credit"
     reset_type: str | None = None
     grant_type: str | None = field(default=None, repr=False)
+    unavailable_reason: str | None = None
 
 
 CLAUDE_WINDOWS = {
@@ -86,12 +87,17 @@ def claude_reset_offers(data: dict, *, now: str | None = None) -> tuple[ResetCre
             CLAUDE_WINDOWS.get(item, "Other provider limit")
             for item in raw_scopes if isinstance(item, str) and item
         )) if isinstance(raw_scopes, list) else ()
-        usable = bool(
-            credit_id == block.get("next_grant_id") and grant.get("usable_now") is True
-            and (grant.get("use_requires_limit") is False or block.get("at_limit") is True)
-            and not cooldown and not grant.get("blocking") and scopes
+        restrictions = (
+            (cooldown is not None, "Wait for the cooldown to end"),
+            (grant.get("use_requires_limit") is not False and block.get("at_limit") is not True,
+             "Reach a usage limit first"),
+            (not scopes, "Claude did not report which limits this credit clears"),
+            (credit_id != block.get("next_grant_id"), "Claude has not selected this credit as next"),
+            (grant.get("usable_now") is not True or grant.get("blocking"), "Claude has held this credit"),
         )
-        held.append(ResetOffer(credit_id, expires, remaining, scopes, usable, "Claude reset"))
+        reason = next((message for blocked, message in restrictions if blocked), None)
+        held.append(ResetOffer(credit_id, expires, remaining, scopes, reason is None, "Claude reset",
+                               unavailable_reason=reason))
     return ResetCredits(sum(x.remaining for x in held), _next_expiry(held), sum(x.usable for x in held), cooldown), held
 
 
@@ -169,7 +175,8 @@ def zai_reset_offers(data: dict, *, now: str | None = None) -> tuple[ResetCredit
                 return None, []
             seen.add(key)
             offers.append(ResetOffer(str(record), expiry, windows=(scope,), usable=bool(valid_grant),
-                                     label="GLM reset pack", reset_type=reset_type, grant_type=valid_grant))
+                                     label="GLM reset pack", reset_type=reset_type, grant_type=valid_grant,
+                                     unavailable_reason=None if valid_grant else "z.ai did not report a usable pack type"))
     offers.sort(key=lambda offer: (offer.expires_at, offer.reset_type, offer.credit_id))
     counts = {scope: sum(offer.windows == (scope,) for offer in offers) for _, _, scope in buckets}
     return ResetCredits(len(offers), _next_expiry(offers), sum(offer.usable for offer in offers),
