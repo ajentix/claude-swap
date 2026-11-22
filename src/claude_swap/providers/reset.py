@@ -103,7 +103,9 @@ def _claude_target(identifier: str, switcher: ClaudeAccountSwitcher) -> ResetTar
     entry = next((row for row in accounts if str(row[0]) == str(number)), None)
     if entry is None:
         raise ProviderError("Claude account not found")
-    _, email, _, org_uuid, _, credentials, alias = entry
+    _, email, _, org_uuid, is_active, credentials, alias = entry
+    if not is_active:
+        credentials = switcher._session_profile_ahead(str(number), email, org_uuid) or credentials
     headers = claude_headers(credentials, cli_identity=True)  # the inventory and redeem need the CLI identity
     profile = get_usage(CLAUDE_PROFILE_URL, headers)
     live_org = _uuid(object_dict(profile.get("organization")).get("uuid"))
