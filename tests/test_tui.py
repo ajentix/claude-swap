@@ -958,7 +958,7 @@ class TestDashboard:
             assert not isinstance(app.screen, quota.QuotaScreen)
 
     async def test_quota_reset_cancel_and_confirm(self, tmp_path, monkeypatch):
-        from textual.widgets import DataTable
+        from textual.widgets import DataTable, Static
 
         from claude_swap.providers.common import ProviderAccountQuota, ResetCredits
         from claude_swap.providers.reset import ResetIntent, ResetOffer, ResetOptions, ResetTarget
@@ -971,7 +971,9 @@ class TestDashboard:
         row = ProviderAccountQuota("codex", "personal", "1", reset_credits=ResetCredits(1))
         target = ResetTarget("codex", "1", "personal", "id", "work", {})
         chosen = ResetOffer("opaque-2", windows=("Codex usage limits",))
-        offers = (ResetOffer("opaque-1", usable=False), chosen)
+        held = ResetOffer("opaque-1", windows=("Fable 7d",), usable=False,
+                          unavailable_reason="Reach a usage limit first")
+        offers = (held, chosen)
         options = ResetOptions(target, 0, ResetCredits(2), offers)
         intent = ResetIntent(target, chosen, 0)
 
@@ -992,9 +994,15 @@ class TestDashboard:
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert isinstance(app.screen, quota.ResetCreditsScreen)
+            detail = app.screen.query_one("#reset-credit-detail", Static)
+            assert str(detail.content) == "Fable 7d · Reach a usage limit first"
+            assert str(app.screen.query_one("#reset-credit-status", Static).content) == "Credits left 2 / Options usable now 1"
             await pilot.press("enter")
             assert isinstance(app.screen, quota.ResetCreditsScreen)
-            await pilot.press("down", "enter")
+            assert str(detail.content) == "Fable 7d · Reach a usage limit first"
+            await pilot.press("down")
+            assert str(detail.content) == "Codex usage limits · Usable now"
+            await pilot.press("enter")
             assert isinstance(app.screen, ConfirmModal)
             assert app.screen.focused.id == "no"
             await pilot.press("enter")
@@ -1357,6 +1365,31 @@ class TestWatchScreen:
         return FakeSwitcher(
             [make_account(1, active=True), make_account(2)], tmp_path
         )
+
+    async def test_watch_keeps_reading_time_and_bars_when_lookup_fails(self, tmp_path, monkeypatch):
+        from claude_swap import external
+        from claude_swap.tui.widgets import AccountCard, ExternalCard
+
+        fetched = datetime(2020, 1, 2, 3, 4, tzinfo=timezone.utc).timestamp()
+        usage = dataclasses.replace(make_usage_at(fetched), last_error="rate limited")
+        stats = external.ExternalAccount("codex", "personal", product="Codex", fetched_at=fetched,
+                                         error="HTTP 429", windows=(external.ExternalWindow("5h", 40),))
+        source = external.Source(name="codex")
+        monkeypatch.setattr(external, "load_sources", lambda: [source])
+        monkeypatch.setattr(external, "stored", lambda _: [stats])
+        monkeypatch.setattr(external, "fetch", lambda *_args, **_kwargs: [stats])
+        app = make_app(FakeSwitcher([make_account(1, entry=usage), make_account(2, entry=UsageEntry())], tmp_path))
+        async with app.run_test(size=(72, 32)) as pilot:
+            await settle(pilot)
+            await pilot.press("w")
+            await settle(pilot)
+            claude, unread = app.screen.query(AccountCard)
+            assert "Last read 01-02 12:04 KST · ⚠ rate limited" in claude.render().plain
+            assert "25%" in claude.render().plain
+            assert "No usage reading yet" in unread.render().plain
+            codex = app.screen.query_one(ExternalCard).render().plain
+            assert "Codex · Last read 01-02 12:04 KST · ⚠ HTTP 429" in codex
+            assert "40%" in codex
 
     async def test_w_opens_monitor_without_cursor(self, tmp_path):
         app = make_app(self._fake(tmp_path))

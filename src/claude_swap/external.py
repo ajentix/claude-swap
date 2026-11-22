@@ -260,7 +260,7 @@ def stored(source: Source) -> list[ExternalAccount]:
     accounts = _parse(source, rows, _positive(entry.get("at"), 0) or None) if isinstance(rows, list) else []
     error = entry.get("error")
     if isinstance(error, str) and error:
-        return [replace(accounts[0], error=error), *accounts[1:]] if accounts else [
+        return [replace(account, error=error) for account in accounts] if accounts else [
             ExternalAccount(source.name, "-", error=error),
         ]
     return accounts
@@ -350,7 +350,7 @@ def _keep_last_windows(previous: object, rows: list, previous_at: float | None =
 def fetch(source: Source, *, force: bool = False) -> list[ExternalAccount]:
     """Rows for the source: the store's while fresh or claimed, else a new run.
 
-    A failed run keeps the last good rows (with the error on the first) or, with
+    A failed run keeps the last good rows with the lookup error or, with
     none stored, becomes one error row.
     """
     try:

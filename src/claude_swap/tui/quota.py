@@ -15,7 +15,7 @@ from textual.widgets import DataTable, Footer, Static
 
 from claude_swap.providers.common import KST, ProviderAccountQuota, ProviderError, home, quota_cells, quota_status, reset_clock, reset_credit_cells
 from claude_swap.providers.quota import SWITCHERS, collect_quota, invalidate_quota
-from claude_swap.providers.reset import OUTCOMES, RESET_PROVIDERS, ResetIntent, ResetOptions, reset_options, redeem_reset
+from claude_swap.providers.reset import OUTCOMES, RESET_PROVIDERS, ResetIntent, ResetOffer, ResetOptions, reset_options, redeem_reset
 from claude_swap.tui.modals import ConfirmModal
 
 
@@ -36,6 +36,7 @@ class ResetCreditsScreen(ModalScreen[ResetIntent | None]):
         with Vertical():
             yield Static(f"Reset credits / {self.options.target.label}", markup=False)
             yield DataTable(cursor_type="row", zebra_stripes=True)
+            yield Static("", id="reset-credit-detail", markup=False)
             yield Static("", id="reset-credit-status", markup=False)
             yield Footer()
 
@@ -55,12 +56,35 @@ class ResetCreditsScreen(ModalScreen[ResetIntent | None]):
                 scope = ", ".join(self.options.pending.offer.windows) or "-"
                 table.add_row("Previous request", scope, "-", "-", "Retry same request", key="retry")
             message = message or ("Request is still in progress" if state == "sending" else "Outcome unknown")
-        elif self.options.credits:
-            message = f"{self.options.credits.available_count} credit(s) held"
-            if self.options.credits.cooldown_until:
-                message += f" / Cooldown until {reset_clock(self.options.credits.cooldown_until, now)} KST"
-        self.query_one("#reset-credit-status", Static).update(message or "Balance unavailable")
+        elif self.options.credits is not None:
+            credits = self.options.credits
+            if credits.eligible is False:
+                message = "This account is not offered reset credits."
+            else:
+                ready = sum(offer.usable for offer in self.options.offers)
+                message = f"Credits left {credits.available_count} / Options usable now {ready}"
+                if credits.cooldown_until:
+                    message += f" / Cooldown until {reset_clock(credits.cooldown_until, now)} KST"
+                elif credits.available_count and not self.options.offers:
+                    message += " / Provider did not report individual credit details"
+        self.query_one("#reset-credit-status", Static).update(message or "Provider did not report a credit balance.")
         table.focus()
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        key = event.row_key.value
+        if key == "retry" and self.options.pending:
+            offer = self.options.pending.offer
+            condition = "Retry the same request"
+        elif key:
+            offer = self.options.offers[int(key) - 1]
+            condition = "Usable now" if offer.usable else offer.unavailable_reason or "Held by provider"
+        else:
+            return
+        self._show_credit_detail(offer, condition)
+
+    def _show_credit_detail(self, offer: ResetOffer, condition: str) -> None:
+        scope = ", ".join(offer.windows) or "Affected limits unspecified"
+        self.query_one("#reset-credit-detail", Static).update(f"{scope} · {condition}")
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         key = event.row_key.value
@@ -70,7 +94,8 @@ class ResetCreditsScreen(ModalScreen[ResetIntent | None]):
             try:
                 intent = self.options.choose(int(key))
             except ProviderError as exc:
-                self.query_one("#reset-credit-status", Static).update(str(exc))
+                offer = self.options.offers[int(key) - 1]
+                self._show_credit_detail(offer, offer.unavailable_reason or str(exc))
             else:
                 self.dismiss(intent)
 

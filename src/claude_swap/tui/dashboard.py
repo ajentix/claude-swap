@@ -230,6 +230,7 @@ class AccountListScreen(Screen):
     """
 
     app: "CswapApp"
+    show_usage_status = False
 
     def __init__(self) -> None:
         super().__init__()
@@ -253,7 +254,9 @@ class AccountListScreen(Screen):
             first_build = not self._numbers
             previous = listview.index
             await listview.clear()
-            await listview.extend(AccountItem(acc) for acc in snap.accounts)
+            await listview.extend(
+                AccountItem(acc, show_usage_status=self.show_usage_status) for acc in snap.accounts
+            )
             self._numbers = numbers
             listview.index = (
                 self._index_after_build(snap, first_build, previous)
@@ -350,6 +353,7 @@ class WatchScreen(AccountListScreen):
     disarms selection first, then leaves the screen.
     """
 
+    show_usage_status = True
     _WATCH_TITLE = "watching all accounts"
     _SELECT_TITLE = "switch to which account? · enter confirm · esc cancel"
 

@@ -60,6 +60,19 @@ def test_claude_distinguishes_fable_from_full_reset():
     assert [(offer.windows, offer.usable) for offer in offers] == [
         (("Fable 7d",), True), (("All usage limits",), False),
     ]
+    assert offers[0].unavailable_reason is None
+    assert offers[1].unavailable_reason == "Claude has not selected this credit as next"
+
+
+@pytest.mark.parametrize(("changes", "reason"), [
+    ({"at_limit": False}, "Reach a usage limit first"),
+    ({"cooldown_until": "2099-01-01T00:00:00Z"}, "Wait for the cooldown to end"),
+])
+def test_claude_held_credit_explains_its_condition(changes, reason):
+    _, offers = reset_credits.claude_reset_offers(claude_usage(**changes), now="2026-11-23T00:00:00+00:00")
+    assert offers[0].usable is False
+    assert offers[0].windows == ("7d",)
+    assert offers[0].unavailable_reason == reason
 
 
 def test_zai_redeems_and_retries_the_exact_window_and_pack(monkeypatch, tmp_path):

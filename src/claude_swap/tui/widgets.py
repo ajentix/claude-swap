@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
+from datetime import datetime
 from typing import TYPE_CHECKING, Callable
 
 from rich.cells import cell_len
@@ -21,6 +22,7 @@ from claude_swap.json_output import USAGE_API_KEY, USAGE_RELOGIN_REQUIRED
 from claude_swap.models import AccountSnapshot
 from claude_swap.oauth import FIVE_HOUR_LABEL
 from claude_swap.printer import format_age
+from claude_swap.providers.common import KST, reset_clock, timestamp
 from claude_swap.switcher import ERROR_NOTES
 from claude_swap.usage_store import STALE_OK_S
 from claude_swap.tui import data
@@ -263,6 +265,7 @@ def account_card_text(
     label_prefix: str = "",
     fixed_label_width: int | None = None,
     reset_credits: dict | None = None,
+    show_usage_status: bool = False,
 ) -> Text:
     """The full account card: header line + per-window bar rows. Each row's
     tick is the switch line that row is judged against: ``threshold`` on the
@@ -290,11 +293,17 @@ def account_card_text(
     _append_plan(text, acc, "   ", palette, label_prefix.strip())
     credits = reset_credits or (acc.usage.last_good.get("reset_credits") if isinstance(acc.usage.last_good, dict) else None)
     age = data.format_age(acc.usage.age_s)
-    if age:
+    if age and not show_usage_status:
         text.append(f"   {age}", style=palette.muted)
     text.append(login_segment(acc, login, now, "   "), style=palette.muted)
 
     sentinel = acc.usage.sentinel
+    if show_usage_status and sentinel != USAGE_API_KEY:
+        error = acc.usage.last_error
+        text.append_text(reading_status(
+            acc.usage.fetched_at, ERROR_NOTES.get(error, error) if error else "",
+            palette=palette,
+        ))
     if sentinel is not None:
         text.append("\n    ")
         style = palette.muted if sentinel == USAGE_API_KEY else palette.sev_warn
@@ -314,7 +323,7 @@ def account_card_text(
     if not rows:
         text.append("\n    ")
         text.append("usage unavailable", style=palette.muted)
-        if acc.usage.last_error:
+        if acc.usage.last_error and not show_usage_status:
             # Same wording as the CLI detail line: error KINDS with a
             # friendly note render it, so both surfaces describe the state
             # identically.
@@ -531,10 +540,12 @@ class AccountsPanel(Static):
 class AccountCard(Static):
     """One account rendered full-size (used by the switch screen's list)."""
 
-    def __init__(self, acc: AccountSnapshot, *, threshold: float | None = None) -> None:
+    def __init__(self, acc: AccountSnapshot, *, threshold: float | None = None,
+                 show_usage_status: bool = False) -> None:
         super().__init__()
         self._acc = acc
         self._threshold = threshold
+        self._show_usage_status = show_usage_status
         self._extras: list = []  # (prefix, ExternalAccount) with this card's email
         self._prefix = ""  # product name before each Claude row ("Claude 7d") once a screen mixes products
         self._reset_credits: dict | None = None  # from claude_resets, over the usage reading's own
@@ -566,6 +577,7 @@ class AccountCard(Static):
             self._acc, width, width, threshold=self._threshold, palette=palette,
             label_prefix=self._prefix, fixed_label_width=self._label_w, reset_credits=self._reset_credits,
             show_tag=self.app.tag_shown(self._acc),
+            show_usage_status=self._show_usage_status,
         )
         if self._extras:
             # Each merged product adds its header segments to the first line and
@@ -593,8 +605,8 @@ class AccountCard(Static):
 class AccountItem(ListItem):
     """ListView row wrapping an :class:`AccountCard`; remembers its slot."""
 
-    def __init__(self, acc: AccountSnapshot) -> None:
-        super().__init__(AccountCard(acc))
+    def __init__(self, acc: AccountSnapshot, *, show_usage_status: bool = False) -> None:
+        super().__init__(AccountCard(acc, show_usage_status=show_usage_status))
         self.number = acc.number
         self.email = acc.email
         self.org_uuid = acc.org_uuid
@@ -683,10 +695,11 @@ def ext_label_width(acc: "ExternalAccount", prefix: str) -> int:
 
 
 def ext_rows(acc: "ExternalAccount", prefix: str, width: int, label_w: int, *, palette: Palette = Palette.DARK) -> Text:
-    """One indented bar row per window; the first carries the active marker."""
-    text = Text()
+    """The source's reading status, usage windows and reset credits."""
+    text = reading_status(acc.fetched_at, acc.error, product=acc.product or prefix or acc.source,
+                          palette=palette)
     bar_w = _bar_width(width, label_w)
-    for i, w in enumerate(acc.windows):
+    for w in acc.windows:
         label = f"{_row_label(prefix, w):<{label_w}}"
         text.append("\n    ")
         if w.used_pct is None:
@@ -698,9 +711,6 @@ def ext_rows(acc: "ExternalAccount", prefix: str, width: int, label_w: int, *, p
                                   bar_w, palette=palette))
     if acc.reset_credits is not None:
         text.append(reset_row(acc.product or prefix or acc.source, acc.reset_credits, label_w, palette=palette))
-    if acc.error:
-        text.append("\n    ")
-        text.append(f"⚠ {acc.error}", style=palette.sev_warn)
     return text
 
 
@@ -774,10 +784,16 @@ def ext_header_bits(acc: "ExternalAccount", prefix: str, *, palette: Palette = P
     return text
 
 
-def _age(acc: "ExternalAccount") -> str | None:
-    if acc.fetched_at is not None and time.time() - acc.fetched_at >= 60:
-        return f"· {data.format_duration(time.time() - acc.fetched_at)} ago"
-    return None
+def reading_status(fetched_at: float | None, error: str, *, product: str = "",
+                   palette: Palette) -> Text:
+    """The displayed measurement's time and the latest lookup failure, if any."""
+    stamp = timestamp(fetched_at)
+    when = f"Last read {reset_clock(stamp, datetime.now(KST))} KST" if stamp else "No usage reading yet"
+    label = f"{product} · " if product else ""
+    text = Text(f"\n    {label}{when}", style=palette.muted)
+    if error:
+        text.append(f" · ⚠ {error}", style=palette.sev_warn)
+    return text
 
 
 def external_card_text(acc: "ExternalAccount", width: int, *, prefix: str = "", label_w: int | None = None,
@@ -785,9 +801,6 @@ def external_card_text(acc: "ExternalAccount", width: int, *, prefix: str = "", 
     text = Text("    ")
     text.append(acc.account, style=palette.foreground)
     text.append(ext_header_bits(acc, prefix, palette=palette))
-    age = _age(acc)
-    if age:
-        text.append(f"   {age}", style=palette.muted)
     text.append(ext_rows(acc, prefix, width, label_w or ext_label_width(acc, prefix), palette=palette))
     return text
 

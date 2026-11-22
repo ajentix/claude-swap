@@ -32,7 +32,7 @@ cswap reset zai-glm CodexBar --list
 cswap reset zai-glm CodexBar --credit 1
 ```
 
-In the TUI, open **All Providers Quota**, select an account and press `x`. Choose a credit and review the account and affected limits on the confirmation screen. The list distinguishes available credits, held credits, and a previous request that can be retried. For scripts, `--yes` confirms the selected credit and `--json` prints the outcome. CLI credit numbers refer to the live order shown by `--list`.
+In the TUI, open **All Providers Quota**, select an account and press `x`. Highlight a credit to see the limits it clears and whether it can be used now. Held credits show the known condition, such as reaching a usage limit or waiting for a cooldown. The screen also shows credits left and any previous request that can be retried. Press Enter on an available credit to review the account and affected limits before confirming. For scripts, `--yes` confirms the selected credit and `--json` prints the outcome. CLI credit numbers refer to the live order shown by `--list`.
 
 - **Claude** shows the windows the grant clears, such as Fable, account-wide windows, or an explicitly all-limits grant. Claude chooses which grant is eligible next and may require reaching a limit or waiting out a cooldown.
 - **Codex** shows each available credit and its expiration. With no explicit choice, it picks the earliest available expiration.
